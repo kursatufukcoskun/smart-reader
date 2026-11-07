@@ -5,6 +5,7 @@ Yapay zekâ destekli, kişisel kullanım için geliştirilmiş **EPUB / PDF okuy
 | Platform | Teknoloji | Klasör |
 |---|---|---|
 | iPad / iOS (17+) | Swift, SwiftUI, WidgetKit | [`ios/`](ios) |
+| Mac (Mac Catalyst, iPad kodundan) | aynı SwiftUI kodu | [`ios/`](ios) |
 | Android (minSdk 26) | Kotlin, Jetpack Compose, Material 3 | [`android/`](android) |
 
 Her iki sürüm de aynı Google Drive senkron biçimini kullanır ([`SYNC.md`](SYNC.md)); böylece kitaplık, vurgular, kelime defteri ve okuma ilerlemesi cihazlar arasında eşlenir.
@@ -34,6 +35,7 @@ Her iki sürüm de aynı Google Drive senkron biçimini kullanır ([`SYNC.md`](S
 
 **Notlar ve öğrenme**
 - 5 renkli vurgu, not ekleme, Markdown dışa aktarma
+- **Apple Pencil (iPad):** kalem modunda metnin üstünü/altını çizerek vurgula, altını çiz veya dalgalı çiz (5 renk); ardından çevir, açıkla ya da not al. Pencil 2 çift dokunuşu stili değiştirir. Parmakla kaydırma aynen çalışır.
 - Kelime defteri: Leitner (0–5 kutu) aralıklı tekrar, Anki uyumlu `.txt` dışa aktarma
 
 **İstatistik ve hatırlatmalar**
@@ -91,3 +93,7 @@ Ayrıntılar, Google girişi kurulumu ve aşama notları için [`android/README.
 ## Not
 
 Bu proje kişisel kullanım içindir; mağazada yayımlanması planlanmamıştır. Birlikte gelen Bookerly yazı tipi dosyaları kendi lisanslarına tabidir.
+
+## Mac
+
+iPad uygulaması Mac Catalyst ile Mac'te de çalışır (aynı kod tabanı). Xcode'da hedef olarak **My Mac (Mac Catalyst)** seçilir; imza için Apple geliştirici hesabı gerekir. Klavye: **→ / Boşluk / Page Down** ileri, **← / Shift+Boşluk / Page Up** geri (okuyucuya tıklayınca). Kalem modu Mac'te gizlidir; fareyle metin seçip vurgulama aynen çalışır.

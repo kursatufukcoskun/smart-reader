@@ -78,6 +78,23 @@ enum PDFText {
 final class ReaderPDFView: PDFView {
     var onMenuAction: ((SelectionAction) -> Void)?
 
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if let key = presses.first?.key,
+           key.modifierFlags.intersection([.command, .control, .alternate]).isEmpty {
+            switch key.keyCode {
+            case .keyboardRightArrow, .keyboardPageDown: goToNextPage(nil); return
+            case .keyboardLeftArrow, .keyboardPageUp: goToPreviousPage(nil); return
+            case .keyboardSpacebar:
+                if key.modifierFlags.contains(.shift) { goToPreviousPage(nil) } else { goToNextPage(nil) }
+                return
+            default: break
+            }
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
     override func buildMenu(with builder: UIMenuBuilder) {
         super.buildMenu(with: builder)
         let explain = UIAction(title: "Açıkla", image: UIImage(systemName: "text.magnifyingglass")) { [weak self] _ in
@@ -130,6 +147,23 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
 
     @Published var pageIndex: Int
     @Published var hasSelection = false
+
+    /// Atlamadan önceki sayfa: doluyken "kalıcı olsun mu?" çubuğu görünür.
+    /// Kitap başına cihazda saklanır (senkronlanmaz); kullanıcı cevaplayana kadar kalır.
+    @Published var returnPage: Int? {
+        didSet {
+            let key = "returnPage-\(book.id.uuidString)"
+            if let p = returnPage { UserDefaults.standard.set(p, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+    }
+
+    // Apple Pencil
+    @Published var penMode = false
+    @Published var penResult: PenResult?
+    private let penRecognizer = PenStrokeRecognizer(target: nil, action: nil)
+    private let pencilTap = PencilTapHandler()
+    private var penDismiss: Task<Void, Never>?
     private var bag = Set<AnyCancellable>()
 
     var pageCount: Int { document.pageCount }
@@ -145,6 +179,9 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         self.pageIndex = min(max(book.position, 0), max(document.pageCount - 1, 0))
         self.chat = ChatModel(settings: settings, bookTitle: book.title)
         super.init()
+        if let p = UserDefaults.standard.object(forKey: "returnPage-\(book.id.uuidString)") as? Int, p < document.pageCount {
+            returnPage = p
+        }
         chat.contextProvider = { [weak self] budget in await self?.buildChatContext(budget: budget) ?? .empty }
         speech.settings = settings
         speech.source = SpeechSource(
@@ -180,6 +217,15 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         pdfView.pageBreakMargins = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         pdfView.backgroundColor = .systemGray5
         pdfView.onMenuAction = { [weak self] a in self?.perform(a) }
+        penRecognizer.isEnabled = false
+        penRecognizer.appearance = { [weak self] in
+            guard let s = self?.settings else { return (.highlight, .systemYellow) }
+            return (s.penStyle, s.highlightColor.uiColor)
+        }
+        penRecognizer.onStroke = { [weak self] pts in self?.penStroke(pts) }
+        pdfView.addGestureRecognizer(penRecognizer)
+        pencilTap.onTap = { [weak self] in self?.cyclePenStyle() }
+        pencilTap.attach(to: pdfView)
 
         if let page = document.page(at: pageIndex) {
             DispatchQueue.main.async { [weak self] in self?.pdfView.go(to: page) }
@@ -310,12 +356,12 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         return (raw, String(paragraph.prefix(3500)))
     }
 
-    func perform(_ action: SelectionAction) {
-        if action == .highlight || action == .note {
+    func perform(_ action: SelectionAction, context: (text: String, paragraph: String)? = nil) {
+        if context == nil, action == .highlight || action == .note {
             createHighlight(openNote: action == .note)
             return
         }
-        guard let sel = selectionContext() else { return }
+        guard let sel = context ?? selectionContext() else { return }
         switch action {
         case .explain:
             ai.start(AIRequest(
@@ -359,7 +405,7 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         toast = "Yer imi eklendi"
     }
 
-    func goTo(_ b: Bookmark) { if let p = b.page { go(to: p) } }
+    func goTo(_ b: Bookmark) { if let p = b.page { jump(to: p) } }
 
     /// Son `count` sayfayı (bulunduğunuz sayfa dahil) çalışma setine çevirir.
     func prepareStudy(lastPages count: Int) {
@@ -397,8 +443,13 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         let cg = rects.filter { $0.count == 4 }.map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) }
         guard let first = cg.first else { return nil }
         let union = cg.reduce(first) { $0.union($1) }
-        let ann = PDFAnnotation(bounds: union, forType: .highlight, withProperties: nil)
-        ann.color = h.color.uiColor.withAlphaComponent(0.42)
+        let subtype: PDFAnnotationSubtype
+        switch h.effectiveStyle {
+        case .highlight: subtype = .highlight
+        case .underline, .wavy: subtype = .underline  // PDFKit'te dalgalı çizgi yok
+        }
+        let ann = PDFAnnotation(bounds: union, forType: subtype, withProperties: nil)
+        ann.color = h.effectiveStyle == .highlight ? h.color.uiColor.withAlphaComponent(0.42) : h.color.uiColor
         ann.quadrilateralPoints = cg.flatMap { r -> [NSValue] in
             [CGPoint(x: r.minX - union.minX, y: r.maxY - union.minY),
              CGPoint(x: r.maxX - union.minX, y: r.maxY - union.minY),
@@ -420,8 +471,9 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         for a in page.annotations where a.userName == h.id.uuidString { page.removeAnnotation(a) }
     }
 
-    private func createHighlight(openNote: Bool) {
-        guard let sel = pdfView.currentSelection else { return }
+    @discardableResult
+    private func createHighlight(from selection: PDFSelection? = nil, style: HighlightStyle = .highlight, openNote: Bool) -> Highlight? {
+        guard let sel = selection ?? pdfView.currentSelection else { return nil }
         let lines = sel.selectionsByLine()
         var first: Highlight?
         for page in sel.pages {
@@ -433,6 +485,7 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
             guard !text.isEmpty else { continue }
             let idx = document.index(for: page)
             var h = Highlight(bookID: book.id, bookTitle: book.title, text: text, color: settings.highlightColor)
+            h.style = style == .highlight ? nil : style
             h.page = idx
             h.rects = rects.map { [Double($0.origin.x), Double($0.origin.y), Double($0.size.width), Double($0.size.height)] }
             h.location = "Sayfa \(idx + 1)"
@@ -440,9 +493,95 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
             if let (p, ann) = annotation(for: h) { p.addAnnotation(ann) }
             if first == nil { first = h }
         }
-        pdfView.clearSelection()
-        hasSelection = false
+        if selection == nil {
+            pdfView.clearSelection()
+            hasSelection = false
+        }
         if openNote, let h = first { editing = EditingHighlight(highlight: h, focusNote: true) }
+        return first
+    }
+
+    // MARK: Apple Pencil
+
+    func togglePenMode() { setPenMode(!penMode) }
+
+    func setPenMode(_ on: Bool) {
+        penMode = on
+        penRecognizer.isEnabled = on
+        PenTouch.restrictScroll(in: pdfView, penOnly: on)
+        if !on { dismissPenResult() }
+    }
+
+    func cyclePenStyle() {
+        guard penMode else { return }
+        let all = HighlightStyle.allCases
+        let i = all.firstIndex(of: settings.penStyle) ?? 0
+        settings.penStyle = all[(i + 1) % all.count]
+        toast = settings.penStyle.title
+    }
+
+    private static func isWordChar(_ c: unichar) -> Bool {
+        guard let u = Unicode.Scalar(c) else { return true }
+        return CharacterSet.alphanumerics.contains(u) || c == 0x27 || c == 0x2019
+    }
+
+    private func penStroke(_ pts: [CGPoint]) {
+        let style = settings.penStyle
+        guard let start = pts.first, let page = pdfView.page(for: start, nearest: true),
+              let pageText = page.string, !pageText.isEmpty else { return }
+        let ns = pageText as NSString
+        // PDF sayfa koordinatında y yukarı artar; altı çizgi metnin altında olduğundan biraz yukarı bakılır.
+        let offsets: [CGFloat] = style == .highlight ? [0, -3, 3] : [6, 12, 3, -3]
+        let step = max(1, pts.count / 80)
+        var lo = Int.max, hi = -1
+        for p in stride(from: 0, to: pts.count, by: step).map({ pts[$0] }) + [pts[pts.count - 1]] {
+            let pp = pdfView.convert(p, to: page)
+            for off in offsets {
+                let i = page.characterIndex(at: CGPoint(x: pp.x, y: pp.y + off))
+                if i != NSNotFound, i >= 0, i < ns.length {
+                    lo = min(lo, i); hi = max(hi, i)
+                    break
+                }
+            }
+        }
+        guard hi >= 0 else { return }
+        while lo > 0, Self.isWordChar(ns.character(at: lo - 1)) { lo -= 1 }
+        while hi < ns.length - 1, Self.isWordChar(ns.character(at: hi + 1)) { hi += 1 }
+        guard let sel = page.selection(for: NSRange(location: lo, length: hi - lo + 1)),
+              let h = createHighlight(from: sel, style: style, openNote: false) else { return }
+        let paragraph = PDFText.paragraph(in: pageText, around: lo) ?? h.text
+        tracker.touch()
+        showPenResult(PenResult(highlight: h, paragraph: String(paragraph.prefix(3500))))
+    }
+
+    private func showPenResult(_ r: PenResult) {
+        penResult = r
+        penDismiss?.cancel()
+        penDismiss = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            if !Task.isCancelled { self?.penResult = nil }
+        }
+    }
+
+    func dismissPenResult() {
+        penDismiss?.cancel()
+        penResult = nil
+    }
+
+    func penAction(_ action: SelectionAction) {
+        guard let r = penResult else { return }
+        dismissPenResult()
+        if action == .note {
+            editing = EditingHighlight(highlight: r.highlight, focusNote: true)
+        } else {
+            perform(action, context: (r.highlight.text, r.paragraph))
+        }
+    }
+
+    func undoPen() {
+        guard let r = penResult else { return }
+        dismissPenResult()
+        deleteHighlight(r.highlight)
     }
 
     func saveHighlight(_ h: Highlight) {
@@ -458,7 +597,21 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
     }
 
     func goTo(_ h: Highlight) {
-        if let p = h.page { go(to: p) }
+        if let p = h.page { jump(to: p) }
+    }
+
+    /// Yer imi / vurgu gibi atlamalar: önceki sayfa dönüş noktası olarak saklanır.
+    func jump(to page: Int) {
+        if returnPage == nil, page != pageIndex { returnPage = pageIndex }
+        go(to: page)
+    }
+
+    func keepJump() { returnPage = nil }
+
+    func returnFromJump() {
+        guard let p = returnPage else { return }
+        returnPage = nil
+        go(to: p)
     }
 
     /// Görünüm yerleştikten sonra sayfaya gider (kitap yeni açıldığında).
@@ -586,6 +739,34 @@ struct PDFReaderView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: model.hasSelection)
+        .overlay(alignment: .top) {
+            if model.penMode {
+                PenPalette(close: { model.setPenMode(false) })
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if model.penResult != nil, !model.hasSelection {
+                PenResultBar(
+                    translate: { model.penAction(.translateParagraph) },
+                    explain: { model.penAction(.explain) },
+                    note: { model.penAction(.note) },
+                    undo: { model.undoPen() })
+                .padding(.bottom, chrome ? 70 : 28)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let rp = model.returnPage {
+                JumpBar(from: "Sayfa \(rp + 1)", keep: { model.keepJump() }, back: { model.returnFromJump() })
+                    .padding(.bottom, chrome ? 124 : 82)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.returnPage)
+        .animation(.easeOut(duration: 0.2), value: model.penMode)
+        .animation(.easeOut(duration: 0.2), value: model.penResult)
         .overlay(alignment: .bottom) {
             if model.speech.isActive {
                 SpeechBar(speech: model.speech)
@@ -603,6 +784,14 @@ struct PDFReaderView: View {
         .navigationTitle(model.book.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            #if !targetEnvironment(macCatalyst)
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { model.togglePenMode() } label: {
+                    Image(systemName: model.penMode ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+                }
+                .accessibilityLabel("Kalem modu")
+            }
+            #endif
             ToolbarItem(placement: .topBarTrailing) {
                 Button { model.toggleBookmark() } label: { Image(systemName: "bookmark") }
             }

@@ -27,6 +27,26 @@ enum HighlightColor: String, Codable, CaseIterable, Identifiable {
     var color: Color { Color(uiColor) }
 }
 
+/// Vurgunun görünümü: dolgu, altı çizili veya dalgalı çizgi (Apple Pencil ile çizilenler için).
+enum HighlightStyle: String, Codable, CaseIterable, Identifiable {
+    case highlight, underline, wavy
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .highlight: return "Vurgu"
+        case .underline: return "Altı çizili"
+        case .wavy: return "Dalgalı"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .highlight: return "highlighter"
+        case .underline: return "underline"
+        case .wavy: return "scribble"
+        }
+    }
+}
+
 struct Highlight: Identifiable, Codable, Hashable {
     var id = UUID()
     var bookID: UUID
@@ -34,6 +54,9 @@ struct Highlight: Identifiable, Codable, Hashable {
     var text: String
     var note: String = ""
     var color: HighlightColor = .yellow
+    /// Boşsa klasik dolgulu vurgu (eski kayıtlar ve Android bu alanı yok sayar).
+    var style: HighlightStyle?
+    var effectiveStyle: HighlightStyle { style ?? .highlight }
     var createdAt = Date()
 
     // EPUB konumu: bölüm + temiz metin içindeki karakter aralığı

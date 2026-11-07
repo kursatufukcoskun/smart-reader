@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct ReaderApp: App {
@@ -26,8 +27,20 @@ struct ReaderApp: App {
                 .environmentObject(bookmarks)
                 .environmentObject(tracker)
                 .environmentObject(sync)
+                .onAppear {
+                    #if targetEnvironment(macCatalyst)
+                    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.forEach {
+                        $0.sizeRestrictions?.minimumSize = CGSize(width: 720, height: 540)
+                    }
+                    #endif
+                }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
+                    case .inactive:
+                        // Mac'te pencere kapanınca uygulama arka plana düşmeyebilir; veriyi şimdiden yaz
+                        #if targetEnvironment(macCatalyst)
+                        library.save(); highlights.save(); vocab.save(); bookmarks.save(); tracker.save()
+                        #endif
                     case .active:
                         sync.syncSoon()
                     case .background:

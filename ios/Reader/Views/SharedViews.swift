@@ -151,7 +151,7 @@ struct ThemePanel: View {
                     ForEach(TranslationLayout.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Text("Sayfa çevirisi orijinalin altında ya da yanında (geniş ekranda) görünür.")
+                Text("Altında/yan yana: orijinalin yanında görünür. Yerine: orijinal gizlenir, çeviri ikonuna dokununca orijinali görürsün (dar ekranda daha rahat).")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Kolon", selection: $settings.columns) {
                     ForEach(ColumnMode.allCases) { Text($0.title).tag($0) }
@@ -277,4 +277,40 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
 func jsString(_ s: String) -> String {
     guard let data = try? JSONEncoder().encode(s), let str = String(data: data, encoding: .utf8) else { return "\"\"" }
     return str
+}
+
+
+/// Başka bir yere atlayınca çıkan soru: kalıcı mı, geçici mi?
+struct JumpBar: View {
+    /// Dönülecek yerin etiketi ("Bölüm 3", "Sayfa 12")
+    var from: String
+    var keep: () -> Void
+    var back: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Buraya atladın").font(.subheadline.weight(.semibold))
+                Text("Kalıcı olsun mu?").font(.caption).foregroundStyle(.secondary)
+            }
+            Button(action: back) {
+                Label("Geri dön", systemImage: "arrow.uturn.backward")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(Color.secondary.opacity(0.18), in: Capsule())
+            }
+            .accessibilityHint(from)
+            Button(action: keep) {
+                Text("Burada kal")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color.accentColor, in: Capsule())
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 18).padding(.trailing, 10).padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+    }
 }

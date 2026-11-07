@@ -45,7 +45,7 @@ Kitabı yalnızca bir cihazdan kaldırmak `library.json`'a dokunmaz (kitap "bulu
 Büyük dosyalar Drive'a *resumable* yükleme (`uploadType=resumable`) ile gönderilir. Dosya adları sorgu için sayfalanarak (`nextPageToken`) listelenir.
 
 ### Highlight
-`id, bookID, bookTitle, text, note, color(yellow|green|blue|pink|orange), createdAt, updatedAt, location`
+`id, bookID, bookTitle, text, note, color(yellow|green|blue|pink|orange), style?(highlight|underline|wavy; yoksa highlight), createdAt, updatedAt, location`
 ve konum: EPUB için `chapter` + `start`/`end` (bölümün **temiz metni** içindeki karakter aralığı;
 `script/style` ve çeviri blokları hariç, tüm metin düğümleri sırayla birleştirilir),
 PDF için `page` + `rects` (`[x, y, genişlik, yükseklik]`, sayfa koordinatı, sol-alt orijin).

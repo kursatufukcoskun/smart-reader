@@ -7,6 +7,21 @@ enum SelectionAction { case explain, translateParagraph, highlight, note, gramma
 /// Seçim menüsüne "Açıkla / Paragrafı Çevir" ekleyen WKWebView.
 final class ReaderWebView: WKWebView {
     var onMenuAction: ((SelectionAction) -> Void)?
+    /// Klavye ile sayfa çevirme (Mac / harici klavye): +1 ileri, -1 geri
+    var onKey: ((Int) -> Void)?
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if let key = presses.first?.key,
+           key.modifierFlags.intersection([.command, .control, .alternate]).isEmpty {
+            switch key.keyCode {
+            case .keyboardRightArrow, .keyboardPageDown: onKey?(1); return
+            case .keyboardLeftArrow, .keyboardPageUp: onKey?(-1); return
+            case .keyboardSpacebar: onKey?(key.modifierFlags.contains(.shift) ? -1 : 1); return
+            default: break
+            }
+        }
+        super.pressesBegan(presses, with: event)
+    }
 
     override func buildMenu(with builder: UIMenuBuilder) {
         super.buildMenu(with: builder)
@@ -59,6 +74,30 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
     var onCenterTap: (() -> Void)?
     private var pendingHighlightID: UUID?
 
+    /// Atlamadan önceki yer: doluyken "kalıcı olsun mu?" çubuğu görünür.
+    struct ReturnPoint: Codable, Equatable { var chapter: Int; var fraction: Double }
+    /// Kitap başına cihazda saklanır (senkronlanmaz); kullanıcı cevaplayana kadar kalır.
+    @Published var returnPoint: ReturnPoint? {
+        didSet { Self.saveReturn(returnPoint, bookID: book.id) }
+    }
+    private static func returnKey(_ id: UUID) -> String { "returnPoint-\(id.uuidString)" }
+    private static func saveReturn(_ r: ReturnPoint?, bookID: UUID) {
+        let d = UserDefaults.standard
+        if let r, let data = try? JSONEncoder().encode(r) { d.set(data, forKey: returnKey(bookID)) }
+        else { d.removeObject(forKey: returnKey(bookID)) }
+    }
+    private static func loadReturn(_ bookID: UUID) -> ReturnPoint? {
+        guard let data = UserDefaults.standard.data(forKey: returnKey(bookID)) else { return nil }
+        return try? JSONDecoder().decode(ReturnPoint.self, from: data)
+    }
+
+    // Apple Pencil
+    @Published var penMode = false
+    @Published var penResult: PenResult?
+    private let penRecognizer = PenStrokeRecognizer(target: nil, action: nil)
+    private let pencilTap = PencilTapHandler()
+    private var penDismiss: Task<Void, Never>?
+
     @Published var chapterIndex: Int
     @Published var hasSelection = false
     @Published var isTranslatingPage = false
@@ -90,6 +129,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         self.webView = ReaderWebView(frame: .zero, configuration: cfg)
         self.chat = ChatModel(settings: settings, bookTitle: book.title)
         super.init()
+        if let r = Self.loadReturn(book.id), r.chapter < package.spine.count { returnPoint = r }
         chat.contextProvider = { [weak self] budget in await self?.buildChatContext(budget: budget) ?? .empty }
 
         cfg.userContentController.add(WeakScriptHandler(self), name: "llm")
@@ -98,6 +138,19 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.allowsLinkPreview = false
         webView.onMenuAction = { [weak self] action in self?.perform(action) }
+        webView.onKey = { [weak self] dir in
+            self?.tracker.touch()
+            self?.webView.evaluateJavaScript("window.__llmTurn(\(dir))", completionHandler: nil)
+        }
+        penRecognizer.isEnabled = false
+        penRecognizer.appearance = { [weak self] in
+            guard let s = self?.settings else { return (.highlight, .systemYellow) }
+            return (s.penStyle, s.highlightColor.uiColor)
+        }
+        penRecognizer.onStroke = { [weak self] pts in self?.penStroke(pts) }
+        webView.addGestureRecognizer(penRecognizer)
+        pencilTap.onTap = { [weak self] in self?.cyclePenStyle() }
+        pencilTap.attach(to: webView)
         applyBackground()
 
         settings.objectWillChange
@@ -216,7 +269,24 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         saveProgress()
     }
 
+    /// Bir atlamadan önce çağrılır: ilk atlamada mevcut yeri dönüş noktası olarak saklar
+    /// (arka arkaya atlamalarda en baştaki yer korunur).
+    private func markReturnPoint() {
+        if returnPoint == nil { returnPoint = ReturnPoint(chapter: chapterIndex, fraction: scrollFraction) }
+    }
+
+    func keepJump() { returnPoint = nil }
+
+    func returnFromJump() {
+        guard let r = returnPoint else { return }
+        returnPoint = nil
+        loadChapter(r.chapter, fraction: r.fraction)
+    }
+
+    var returnLabel: String { returnPoint.map { chapterTitle($0.chapter) } ?? "" }
+
     func openTOC(_ entry: TOCEntry) {
+        markReturnPoint()
         loadChapter(entry.spineIndex, fragment: entry.fragment)
     }
 
@@ -257,7 +327,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
     private var modeJS: String {
         let paged = settings.readingMode == .paged
         let smooth = !settings.theme.isEink
-        return "window.__llmSetMode(\(paged), \(settings.edgeTap), \(smooth), \(settings.margin), \(settings.columns == .double ? 2 : 1)); window.__llmSetLayout(\(settings.translationLayout == .side));"
+        return "window.__llmSetMode(\(paged), \(settings.edgeTap), \(smooth), \(settings.margin), \(settings.columns == .double ? 2 : 1)); window.__llmSetLayout(\(jsString(settings.translationLayout.rawValue)));"
     }
 
     // MARK: - WKNavigationDelegate / mesajlar
@@ -282,6 +352,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if url.isFileURL {
             let path = normalizedPath(url)
             if let i = package.spine.firstIndex(where: { normalizedPath($0.url) == path }), i != chapterIndex {
+                markReturnPoint()
                 loadChapter(i, fragment: url.fragment)
                 return .cancel
             }
@@ -339,6 +410,12 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
                 return
             }
             guard let sel = await currentSelection() else { return }
+            runAI(action, sel)
+        }
+    }
+
+    private func runAI(_ action: SelectionAction, _ sel: SelectionInfo) {
+        do {
             switch action {
             case .explain:
                 ai.start(AIRequest(
@@ -393,6 +470,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
 
     func goTo(_ b: Bookmark) {
         guard let c = b.chapter else { return }
+        markReturnPoint()
         loadChapter(c, fraction: b.fraction ?? 0)
     }
 
@@ -454,7 +532,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
     private func applyHighlightsToPage() {
         let list: [[String: Any]] = highlights.forBook(book.id)
             .filter { $0.chapter == chapterIndex && $0.start != nil && $0.end != nil }
-            .map { ["id": $0.id.uuidString, "start": $0.start!, "end": $0.end!, "color": $0.color.rawValue, "note": !$0.note.isEmpty] }
+            .map { ["id": $0.id.uuidString, "start": $0.start!, "end": $0.end!, "color": $0.color.rawValue, "note": !$0.note.isEmpty, "style": $0.effectiveStyle.rawValue] }
         guard !list.isEmpty, let data = try? JSONSerialization.data(withJSONObject: list),
               let json = String(data: data, encoding: .utf8) else { return }
         webView.evaluateJavaScript("window.__llmApplyAll(\(json))", completionHandler: nil)
@@ -472,15 +550,89 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         h.end = r.end
         h.location = chapterTitle(chapterIndex)
         highlights.add(h)
-        webView.evaluateJavaScript("window.__llmApplyHighlight(\(jsString(h.id.uuidString)), \(r.start), \(r.end), \(jsString(h.color.rawValue)), false); window.getSelection().removeAllRanges();", completionHandler: nil)
+        webView.evaluateJavaScript("window.__llmApplyHighlight(\(jsString(h.id.uuidString)), \(r.start), \(r.end), \(jsString(h.color.rawValue)), false, 'highlight'); window.getSelection().removeAllRanges();", completionHandler: nil)
         hasSelection = false
         if openNote { editing = EditingHighlight(highlight: h, focusNote: true) }
+    }
+
+    // MARK: - Apple Pencil
+
+    func togglePenMode() { setPenMode(!penMode) }
+
+    func setPenMode(_ on: Bool) {
+        penMode = on
+        penRecognizer.isEnabled = on
+        PenTouch.restrictScroll(in: webView, penOnly: on)
+        if !on { dismissPenResult() }
+    }
+
+    func cyclePenStyle() {
+        guard penMode else { return }
+        let all = HighlightStyle.allCases
+        let i = all.firstIndex(of: settings.penStyle) ?? 0
+        settings.penStyle = all[(i + 1) % all.count]
+        toast = settings.penStyle.title
+    }
+
+    private struct PenRange: Decodable { let start: Int; let end: Int; let text: String; let paragraph: String }
+
+    private func penStroke(_ pts: [CGPoint]) {
+        let style = settings.penStyle
+        let color = settings.highlightColor
+        guard let arg = try? JSONSerialization.data(withJSONObject: PenTouch.sample(pts)),
+              let argJSON = String(data: arg, encoding: .utf8) else { return }
+        Task {
+            guard let json = try? await webView.evaluateJavaScript("window.__llmPenRange(\(argJSON), \(style != .highlight))") as? String,
+                  let data = json.data(using: .utf8),
+                  let r = try? JSONDecoder().decode(PenRange.self, from: data) else { return }
+            var h = Highlight(bookID: book.id, bookTitle: book.title, text: r.text, color: color)
+            h.style = style == .highlight ? nil : style
+            h.chapter = chapterIndex
+            h.start = r.start
+            h.end = r.end
+            h.location = chapterTitle(chapterIndex)
+            highlights.add(h)
+            webView.evaluateJavaScript("window.__llmApplyHighlight(\(jsString(h.id.uuidString)), \(r.start), \(r.end), \(jsString(color.rawValue)), false, \(jsString(style.rawValue)))", completionHandler: nil)
+            tracker.touch()
+            showPenResult(PenResult(highlight: h, paragraph: r.paragraph))
+        }
+    }
+
+    private func showPenResult(_ r: PenResult) {
+        penResult = r
+        penDismiss?.cancel()
+        penDismiss = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            if !Task.isCancelled { self?.penResult = nil }
+        }
+    }
+
+    func dismissPenResult() {
+        penDismiss?.cancel()
+        penResult = nil
+    }
+
+    func penAction(_ action: SelectionAction) {
+        guard let r = penResult else { return }
+        dismissPenResult()
+        switch action {
+        case .note:
+            editing = EditingHighlight(highlight: r.highlight, focusNote: true)
+        default:
+            runAI(action, SelectionInfo(text: r.highlight.text, paragraph: r.paragraph))
+        }
+    }
+
+    func undoPen() {
+        guard let r = penResult else { return }
+        dismissPenResult()
+        deleteHighlight(r.highlight)
     }
 
     func saveHighlight(_ h: Highlight) {
         highlights.update(h)
         settings.highlightColor = h.color
-        webView.evaluateJavaScript("window.__llmStyleHighlight(\(jsString(h.id.uuidString)), \(jsString(h.color.rawValue)), \(!h.note.isEmpty))", completionHandler: nil)
+        webView.evaluateJavaScript("window.__llmStyleHighlight(\(jsString(h.id.uuidString)), \(jsString(h.color.rawValue)), \(!h.note.isEmpty), \(jsString(h.effectiveStyle.rawValue)))", completionHandler: nil)
     }
 
     func deleteHighlight(_ h: Highlight) {
@@ -497,6 +649,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
 
     func goTo(_ h: Highlight) {
         guard let c = h.chapter else { return }
+        markReturnPoint()
         if c == chapterIndex {
             webView.evaluateJavaScript("window.__llmScrollToHighlight(\(jsString(h.id.uuidString)))", completionHandler: nil)
         } else {
@@ -669,9 +822,10 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         return JSON.stringify(out);
       };
 
-      var sideLayout = false;
+      var layoutMode = 'below';
+      var TR_ICON = '<svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>';
       function canSide(el) {
-        if (!sideLayout) return false;
+        if (layoutMode !== 'side') return false;
         if (!/^(P|BLOCKQUOTE|H1|H2|H3|H4|H5|H6)$/.test(el.tagName)) return false;
         if (window.innerWidth < 700) return false;
         if (typeof mode !== 'undefined' && mode === 'paged' && columnCount === 2) return false;
@@ -683,6 +837,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         row.remove();
       }
       function removeTr(el) {
+        el.classList.remove('llm-rep', 'llm-showorig');
         var row = el.parentNode;
         if (row && row.classList && row.classList.contains('llm-row')) {
           var tr = row.querySelector('.llm-tr'); if (tr) tr.remove();
@@ -699,6 +854,21 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         var d = document.createElement('div');
         d.className = 'llm-tr';
         d.setAttribute('data-for', id);
+        d.setAttribute('data-text', text);
+        if (layoutMode === 'replace') {
+          d.className = 'llm-tr llm-r';
+          var ic = document.createElement('span');
+          ic.className = 'llm-ic';
+          ic.innerHTML = TR_ICON;
+          var tx = document.createElement('span');
+          tx.className = 'llm-tx';
+          tx.textContent = text;
+          d.appendChild(ic);
+          d.appendChild(tx);
+          el.classList.add('llm-rep');
+          el.parentNode.insertBefore(d, el.nextSibling);
+          return;
+        }
         d.textContent = text;
         if (canSide(el)) {
           var row = document.createElement('div');
@@ -710,12 +880,21 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
           el.parentNode.insertBefore(d, el.nextSibling);
         }
       };
-      window.__llmSetLayout = function (side) {
-        var changed = (!!side !== sideLayout);
-        sideLayout = !!side;
+      // Çevirinin ikonuna dokununca orijinal ile çeviri arasında geçiş
+      function toggleOrig(tr) {
+        var el = tr.previousElementSibling;
+        if (!el || !el.classList.contains('llm-rep')) return;
+        var showOrig = !el.classList.contains('llm-showorig');
+        el.classList.toggle('llm-showorig', showOrig);
+        tr.classList.toggle('llm-collapsed', showOrig);
+      }
+      window.__llmSetLayout = function (layout) {
+        layout = (layout === true) ? 'side' : (layout || 'below');
+        var changed = (layout !== layoutMode);
+        layoutMode = layout;
         if (!changed) return;
         var items = [];
-        document.querySelectorAll('.llm-tr').forEach(function (t) { items.push([t.getAttribute('data-for'), t.textContent]); });
+        document.querySelectorAll('.llm-tr').forEach(function (t) { items.push([t.getAttribute('data-for'), t.getAttribute('data-text') || t.textContent]); });
         items.forEach(function (it) { window.__llmInsert(it[0], it[1]); });
       };
       window.__llmSnippet = function () {
@@ -737,6 +916,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
       window.__llmClear = function () {
         document.querySelectorAll('.llm-tr').forEach(function (e) { e.remove(); });
         document.querySelectorAll('.llm-row').forEach(unwrapRow);
+        document.querySelectorAll('.llm-rep').forEach(function (e) { e.classList.remove('llm-rep', 'llm-showorig'); });
         document.querySelectorAll('[data-llm-id]').forEach(function (e) { e.removeAttribute('data-llm-id'); });
       };
       window.__llmSetHidden = function (h) { document.documentElement.classList.toggle('llm-hide', !!h); };
@@ -788,7 +968,55 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if (e <= s) return null;
         return JSON.stringify({ start: s, end: e, text: sel.toString().replace(/\s+/g, ' ').trim() });
       };
-      window.__llmApplyHighlight = function (id, start, end, color, hasNote) {
+
+      // ---- Apple Pencil: çizilen çizgiyi metin aralığına çevirir ----
+      function penWordChar(ch) { return /[\p{L}\p{N}'’]/u.test(ch); }
+      function penCaret(x, y, offs) {
+        for (var i = 0; i < offs.length; i++) {
+          var r = document.caretRangeFromPoint(x, y + offs[i]);
+          if (!r || r.startContainer.nodeType !== 3) continue;
+          var p = r.startContainer.parentElement;
+          if (!p || p.closest('.llm-tr, script, style, #llm-end')) continue;
+          return { n: r.startContainer, o: r.startOffset };
+        }
+        return null;
+      }
+      window.__llmPenRange = function (pts, underline) {
+        // Altı çizgi metnin biraz altına çizilir: noktayı yukarı kaydırarak satırı bul
+        var offs = underline ? [-4, -9, -15, 3] : [0, 4, -4];
+        var lo = null, hi = null;
+        pts.forEach(function (p) {
+          var c = penCaret(p[0], p[1], offs);
+          if (!c) return;
+          if (!lo) { lo = c; hi = c; return; }
+          var t = document.createRange();
+          t.setStart(lo.n, lo.o);
+          if (t.comparePoint(c.n, c.o) < 0) lo = c;
+          t.setStart(hi.n, hi.o);
+          if (t.comparePoint(c.n, c.o) > 0) hi = c;
+        });
+        if (!lo) return null;
+        var lv = lo.n.nodeValue, ls = lo.o;
+        while (ls > 0 && penWordChar(lv[ls - 1])) ls--;
+        var hv = hi.n.nodeValue, he = hi.o;
+        while (he < hv.length && penWordChar(hv[he])) he++;
+        var r = document.createRange();
+        r.setStart(lo.n, ls);
+        r.setEnd(hi.n, he);
+        var s = cleanOffset(lo.n, ls), e = cleanOffset(hi.n, he);
+        var text = r.toString().replace(/\s+/g, ' ').trim();
+        if (e <= s || !text) return null;
+        var el = lo.n.parentElement;
+        var block = el ? (el.closest(BLOCKS + ',td') || el.closest('div')) : null;
+        var para = block ? (block.innerText || block.textContent || '').replace(/\s+/g, ' ').trim() : text;
+        if (para.length > 3500) {
+          var i = para.indexOf(text);
+          var from = Math.max(0, (i < 0 ? 0 : i) - 1500);
+          para = para.substring(from, from + 3500);
+        }
+        return JSON.stringify({ start: s, end: e, text: text, paragraph: para });
+      };
+      window.__llmApplyHighlight = function (id, start, end, color, hasNote, style) {
         var off = 0;
         cleanNodes().forEach(function (n) {
           var len = n.nodeValue.length, ns = off, ne = off + len;
@@ -803,15 +1031,17 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
           span.setAttribute('data-hl', id);
           span.setAttribute('data-color', color);
           if (hasNote) span.setAttribute('data-note', '1');
+          if (style && style !== 'highlight') span.setAttribute('data-style', style);
           try { r.surroundContents(span); } catch (e) {}
         });
       };
       window.__llmApplyAll = function (list) {
-        list.forEach(function (h) { window.__llmApplyHighlight(h.id, h.start, h.end, h.color, h.note); });
+        list.forEach(function (h) { window.__llmApplyHighlight(h.id, h.start, h.end, h.color, h.note, h.style); });
       };
-      window.__llmStyleHighlight = function (id, color, hasNote) {
+      window.__llmStyleHighlight = function (id, color, hasNote, style) {
         document.querySelectorAll('[data-hl="' + id + '"]').forEach(function (s) {
           s.setAttribute('data-color', color);
+          if (style && style !== 'highlight') s.setAttribute('data-style', style); else s.removeAttribute('data-style');
           if (hasNote) s.setAttribute('data-note', '1'); else s.removeAttribute('data-note');
         });
       };
@@ -920,6 +1150,19 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if (frac !== null) requestAnimationFrame(function () { restoreFraction(frac); });
       };
       window.__llmGoFraction = function (f) { restoreFraction(f); };
+      // Klavye: sayfa modunda sayfa çevir, kaydırma modunda bir ekran kaydır
+      window.__llmTurn = function (dir) {
+        if (mode === 'paged') { turn(dir); return; }
+        var step = window.innerHeight - 48;
+        var max = document.documentElement.scrollHeight - window.innerHeight;
+        if (dir > 0) {
+          if (window.scrollY >= max - 2) post({ type: 'edge', dir: 'next' });
+          else window.scrollTo({ top: Math.min(max, window.scrollY + step), behavior: smooth ? 'smooth' : 'auto' });
+        } else {
+          if (window.scrollY <= 2) post({ type: 'edge', dir: 'prev' });
+          else window.scrollTo({ top: Math.max(0, window.scrollY - step), behavior: smooth ? 'smooth' : 'auto' });
+        }
+      };
 
       // ---- Seslendirme: bölümün paragrafları ve okunan paragrafın işaretlenmesi ----
       window.__llmSpeechParagraphs = function () {
@@ -944,6 +1187,7 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if (id === null || id === undefined) return;
         var el = document.querySelector('[data-llm-id="' + id + '"]');
         if (!el) return;
+        if (el.classList.contains('llm-rep') && !el.classList.contains('llm-showorig') && el.nextElementSibling) el = el.nextElementSibling;
         el.classList.add('llm-speak');
         var rects = el.getClientRects();
         var r = rects.length ? rects[0] : el.getBoundingClientRect();
@@ -982,6 +1226,8 @@ final class EPUBReaderModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if (mode === 'paged' && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) { turn(dx < 0 ? 1 : -1); return; }
         if (Math.abs(dx) > 10 || Math.abs(dy) > 10 || Date.now() - s.time > 350) return;
         if (e.target && e.target.closest && e.target.closest('a')) return;
+        var icn = e.target && e.target.closest && e.target.closest('.llm-ic');
+        if (icn) { toggleOrig(icn.closest('.llm-tr')); return; }
         var hl = e.target && e.target.closest && e.target.closest('.llm-hl');
         if (hl) { post({ type: 'hlTap', id: hl.getAttribute('data-hl') }); return; }
         var w = window.innerWidth;

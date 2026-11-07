@@ -80,6 +80,34 @@ struct EPUBReaderView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: model.hasSelection)
+        .overlay(alignment: .top) {
+            if model.penMode {
+                PenPalette(close: { model.setPenMode(false) })
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if model.penResult != nil, !model.hasSelection {
+                PenResultBar(
+                    translate: { model.penAction(.translateParagraph) },
+                    explain: { model.penAction(.explain) },
+                    note: { model.penAction(.note) },
+                    undo: { model.undoPen() })
+                .padding(.bottom, chrome ? 70 : 28)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if model.returnPoint != nil {
+                JumpBar(from: model.returnLabel, keep: { model.keepJump() }, back: { model.returnFromJump() })
+                    .padding(.bottom, chrome ? 124 : 82)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.returnPoint)
+        .animation(.easeOut(duration: 0.2), value: model.penMode)
+        .animation(.easeOut(duration: 0.2), value: model.penResult)
         .onAppear {
             model.start()
             model.onCenterTap = { chrome.toggle() }
@@ -135,6 +163,14 @@ struct EPUBReaderView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        #if !targetEnvironment(macCatalyst)
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { model.togglePenMode() } label: {
+                Image(systemName: model.penMode ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
+            }
+            .accessibilityLabel("Kalem modu")
+        }
+        #endif
         ToolbarItem(placement: .topBarTrailing) {
             Button { showTOC = true } label: { Image(systemName: "list.bullet") }
         }

@@ -81,9 +81,15 @@ enum ReadingMode: String, CaseIterable, Identifiable {
 }
 
 enum TranslationLayout: String, CaseIterable, Identifiable {
-    case below, side
+    case below, side, replace
     var id: String { rawValue }
-    var title: String { self == .below ? "Altında" : "Yan yana" }
+    var title: String {
+        switch self {
+        case .below: return "Altında"
+        case .side: return "Yan yana"
+        case .replace: return "Yerine"
+        }
+    }
 }
 
 enum ColumnMode: String, CaseIterable, Identifiable {
@@ -146,6 +152,8 @@ final class ReaderSettings: ObservableObject {
     @Published var vocabReminderEnabled: Bool { didSet { d.set(vocabReminderEnabled, forKey: "vocabReminderEnabled") } }
     @Published var columns: ColumnMode { didSet { d.set(columns.rawValue, forKey: "columns") } }
     @Published var highlightColor: HighlightColor { didSet { d.set(highlightColor.rawValue, forKey: "highlightColor") } }
+    /// Apple Pencil ile çizerken kullanılan stil (cihaza özel, senkronlanmaz)
+    @Published var penStyle: HighlightStyle { didSet { d.set(penStyle.rawValue, forKey: "penStyle") } }
     @Published var readingMode: ReadingMode { didSet { d.set(readingMode.rawValue, forKey: "readingMode") } }
     /// Kaydırma modunda kenara dokununca ekran boyu atlama
     @Published var edgeTap: Bool { didSet { d.set(edgeTap, forKey: "edgeTap") } }
@@ -202,6 +210,7 @@ final class ReaderSettings: ObservableObject {
         reminderMinute = d.object(forKey: "reminderMinute") as? Int ?? 0
         vocabReminderEnabled = d.bool(forKey: "vocabReminderEnabled")
         highlightColor = HighlightColor(rawValue: d.string(forKey: "highlightColor") ?? "") ?? .yellow
+        penStyle = HighlightStyle(rawValue: d.string(forKey: "penStyle") ?? "") ?? .highlight
     }
 
     /// Seçili sağlayıcı için hızlı/güçlü model yapılandırması.
@@ -250,6 +259,13 @@ final class ReaderSettings: ObservableObject {
         .llm-row > :first-child { margin: 0 !important; }
         body .llm-row > .llm-tr { margin: 0; }
         .llm-hide .llm-row { display: block; }
+        .llm-rep:not(.llm-showorig) { display: none !important; }
+        .llm-hide .llm-rep { display: revert !important; }
+        body .llm-tr.llm-r { margin: 0 0 0.9em; }
+        .llm-ic { display: inline-block; width: 18px; height: 18px; padding: 5px; margin: -5px 4px -5px -5px; vertical-align: middle; opacity: 0.75; }
+        .llm-ic svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+        body .llm-tr.llm-collapsed { border-left: 0; padding-left: 0; margin: -0.3em 0 0.6em; text-align: right; }
+        .llm-collapsed .llm-tx { display: none; }
         .llm-hl { border-radius: 2px; }
         body .llm-speak { background-color: \(t.isDark ? "rgba(125,183,255,0.20)" : "rgba(255,196,0,0.24)") !important; border-radius: 4px; box-shadow: 0 0 0 4px \(t.isDark ? "rgba(125,183,255,0.20)" : "rgba(255,196,0,0.24)"); }
         body .llm-hl[data-color="yellow"] { background-color: rgba(255,214,10,0.42) !important; }
@@ -257,7 +273,15 @@ final class ReaderSettings: ObservableObject {
         body .llm-hl[data-color="blue"] { background-color: rgba(10,132,255,0.32) !important; }
         body .llm-hl[data-color="pink"] { background-color: rgba(255,55,95,0.32) !important; }
         body .llm-hl[data-color="orange"] { background-color: rgba(255,149,0,0.40) !important; }
-        body .llm-hl[data-note="1"] { border-bottom: 2px solid \(noteLine); }
+        body .llm-hl[data-style="underline"], body .llm-hl[data-style="wavy"] { background-color: transparent !important; text-decoration-thickness: 2px; text-underline-offset: 3px; border-radius: 0; }
+        body .llm-hl[data-style="underline"] { text-decoration-line: underline; text-decoration-style: solid; }
+        body .llm-hl[data-style="wavy"] { text-decoration-line: underline; text-decoration-style: wavy; }
+        body .llm-hl[data-style][data-color="yellow"] { text-decoration-color: rgb(255,204,0); }
+        body .llm-hl[data-style][data-color="green"] { text-decoration-color: rgb(52,199,89); }
+        body .llm-hl[data-style][data-color="blue"] { text-decoration-color: rgb(10,132,255); }
+        body .llm-hl[data-style][data-color="pink"] { text-decoration-color: rgb(255,55,95); }
+        body .llm-hl[data-style][data-color="orange"] { text-decoration-color: rgb(255,149,0); }
+        body .llm-hl[data-note="1"]:not([data-style]) { border-bottom: 2px solid \(noteLine); }
         \(einkCSS)
         """
     }
