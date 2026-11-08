@@ -27,9 +27,9 @@ Hepsi UTF-8 JSON, tarihler ISO-8601 (`2026-11-06T01:30:00Z`), anahtarlar sıral�
 | `highlights.json` | `{version, items:[Highlight], deleted:{id: tarih}}` | Kayıt başına `updatedAt` (yoksa `createdAt`) yeni olan kazanır. `deleted` damgası kayıttan yeniyse kayıt silinir. |
 | `vocab.json` | `{version, items:[VocabEntry], deleted:{id: tarih}}` | Aynı kural (`updatedAt`, yoksa `addedAt`). |
 | `bookmarks.json` | `{version, items:[Bookmark], deleted:{id: tarih}}` | Aynı kural (`updatedAt`, yoksa `createdAt`). |
-| `progress.json` | `{version, books:{kitapId:{position, scrollFraction, progress, updatedAt}}}` | `updatedAt` yeni olan kazanır. `position`: EPUB'da bölüm (spine) indeksi, PDF'te sayfa indeksi (0'dan). `scrollFraction`: EPUB bölümü içinde 0..1. |
+| `progress.json` | `{version, books:{kitapId:{position, scrollFraction, progress, updatedAt}}}` | `updatedAt` yeni olan kazanır. İstemci, yerelde okunmuş bir kitapta uzak konum anlamlı farklıysa (bölüm/sayfa değişmiş ya da %5'ten fazla kaymış) konumu **sessizce uygulamaz**, kullanıcıya sorar; "Burada kal" yerel konuma yeni `updatedAt` verir. `position`: EPUB'da bölüm (spine) indeksi, PDF'te sayfa indeksi (0'dan). `scrollFraction`: EPUB bölümü içinde 0..1. |
 | `reading-log.json` | `{version, entries:[{day, bookID, device, seconds, words, sessions}]}` | Anahtar `day\|bookID\|device`. Aynı anahtarda büyük `seconds` kazanır (sayaç yalnızca artar). Toplamlarda tüm cihazlar toplanır. |
-| `library.json` | `{version, items:[LibraryEntry], deleted:{kitapId: tarih}}` | Kayıt başına `updatedAt` yeni olan kazanır (`updatedAt` = etiketlerin son değişimi, yoksa `addedAt`). `deleted` damgası kayıttan yeniyse kitap her cihazdan kaldırılır. |
+| `library.json` | `{version, items:[LibraryEntry], deleted:{kitapId: tarih}}` | Kayıt başına `updatedAt` yeni olan kazanır (`updatedAt` = etiketlerin ya da başlık/yazarın son değişimi, yoksa `addedAt`; yeni olan kayıttaki başlık, yazar ve etiketler uygulanır). `deleted` damgası kayıttan yeniyse kitap her cihazdan kaldırılır. |
 | `book-<KİTAPID>.epub` / `.pdf` | Kitabın kendisi (kimlik büyük harfli UUID) | Yoksa yükle; başka cihazda kitaba dokununca indir. EPUB, açılmış klasörden yeniden paketlenebilir (`mimetype` ilk girdi, sıkıştırmasız). |
 | `cover-<KİTAPID>.jpg` | Kapak | Yoksa yükle; kapağı olmayan cihaz indirir. |
 | `settings.json` | `updatedAt` + ayarlar | `updatedAt` yeni olan kazanır. **Yalnızca `highlightColor` uygulanır**; tema, yazı tipi/boyutu, satır aralığı, kenar boşluğu, kolon ve okuma modu cihaza özeldir (ekranlar farklı), dosyada yer alsa da diğer cihaza uygulanmaz. |
@@ -45,7 +45,7 @@ Kitabı yalnızca bir cihazdan kaldırmak `library.json`'a dokunmaz (kitap "bulu
 Büyük dosyalar Drive'a *resumable* yükleme (`uploadType=resumable`) ile gönderilir. Dosya adları sorgu için sayfalanarak (`nextPageToken`) listelenir.
 
 ### Highlight
-`id, bookID, bookTitle, text, note, color(yellow|green|blue|pink|orange), style?(highlight|underline|wavy; yoksa highlight), createdAt, updatedAt, location`
+`id, bookID, bookTitle, text, note, color(yellow|green|blue|pink|orange), style?(highlight|underline|wavy; yoksa highlight), kind?(boşsa kullanıcı vurgusu; "insight" ise yapay zekâ içgörüsü: yalnızca bölüm/sayfa konumu taşır, metinde işaretlenmez), createdAt, updatedAt, location`
 ve konum: EPUB için `chapter` + `start`/`end` (bölümün **temiz metni** içindeki karakter aralığı;
 `script/style` ve çeviri blokları hariç, tüm metin düğümleri sırayla birleştirilir),
 PDF için `page` + `rects` (`[x, y, genişlik, yükseklik]`, sayfa koordinatı, sol-alt orijin).
@@ -54,7 +54,8 @@ PDF için `page` + `rects` (`[x, y, genişlik, yükseklik]`, sayfa koordinatı, 
 `id, bookID, bookTitle, snippet, location, createdAt, updatedAt` ve konum: EPUB için `chapter` + `fraction` (0..1), PDF için `page` (0'dan).
 
 ### VocabEntry
-`id, word, gloss, explanation, paragraph, bookID, bookTitle, addedAt, box(0-5), dueAt, reviews, updatedAt`.
+`id, word, gloss, explanation, paragraph, bookID, bookTitle, addedAt, box(0-5), dueAt, reviews, updatedAt, kind?`.
+`kind` boşsa kelime kartı; `"card"` ise vurgudan üretilmiş soru/cevap kartıdır (`word` = soru, `explanation` = cevap + kaynak alıntı, `paragraph` boş).
 
 ## Senkronlanmayanlar
 Günlük hedef ve hatırlatma ayarları, API anahtarları (Claude/Gemini), LLM önbelleği, çeviri önbelleği.

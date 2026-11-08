@@ -92,6 +92,51 @@ enum TranslationLayout: String, CaseIterable, Identifiable {
     }
 }
 
+/// Metin hizalaması: kitabın kendi stilini koru ya da zorla.
+enum TextAlignMode: String, CaseIterable, Identifiable {
+    case book, left, justify
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .book: return "Kitaba göre"
+        case .left: return "Sola"
+        case .justify: return "İki yana"
+        }
+    }
+}
+
+enum HyphenMode: String, CaseIterable, Identifiable {
+    case book, on, off
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .book: return "Kitaba göre"
+        case .on: return "Açık"
+        case .off: return "Kapalı"
+        }
+    }
+}
+
+/// Kelime ipuçlarının yoğunluğu (paragraf başına kaç zor kelime işaretlenir).
+enum GlossLevel: String, CaseIterable, Identifiable {
+    case few, normal, many
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .few: return "Az"
+        case .normal: return "Orta"
+        case .many: return "Çok"
+        }
+    }
+    var perParagraph: Int {
+        switch self {
+        case .few: return 2
+        case .normal: return 4
+        case .many: return 8
+        }
+    }
+}
+
 enum ColumnMode: String, CaseIterable, Identifiable {
     case single, double
     var id: String { rawValue }
@@ -130,6 +175,48 @@ final class ReaderSettings: ObservableObject {
     private let d = UserDefaults.standard
 
     @Published var theme: ReaderTheme { didSet { d.set(theme.rawValue, forKey: "theme") } }
+    /// Tema sistem görünümünü (açık/koyu) izler: gündüz teması ve gece teması ayrı tutulur.
+    @Published var followSystem: Bool { didSet { d.set(followSystem, forKey: "followSystem") } }
+    @Published var dayTheme: ReaderTheme { didSet { d.set(dayTheme.rawValue, forKey: "dayTheme") } }
+    @Published var nightTheme: ReaderTheme { didSet { d.set(nightTheme.rawValue, forKey: "nightTheme") } }
+    private(set) var systemDark = false
+    /// Biyonik okuma: kelimelerin ilk harfleri kalın (yalnızca EPUB).
+    @Published var bionic: Bool { didSet { d.set(bionic, forKey: "bionic") } }
+    /// Satır odaklayıcı: ekranda yalnızca okunan şerit parlak kalır (yalnızca EPUB).
+    @Published var readingRuler: Bool { didSet { d.set(readingRuler, forKey: "readingRuler") } }
+    @Published var rulerFraction: Double { didSet { d.set(rulerFraction, forKey: "rulerFraction") } }
+    /// PDF'te sayfa kenarlarındaki boş beyaz boşluğu kırp (metin daha büyük görünür).
+    /// Yıllık kitap hedefi (0 = kapalı); cihaza özel.
+    @Published var yearlyGoal: Int { didSet { d.set(yearlyGoal, forKey: "yearlyGoal") } }
+    @Published var cropMargins: Bool { didSet { d.set(cropMargins, forKey: "cropMargins") } }
+    @Published var glossLevel: GlossLevel { didSet { d.set(glossLevel.rawValue, forKey: "glossLevel") } }
+    @Published var textAlign: TextAlignMode { didSet { d.set(textAlign.rawValue, forKey: "textAlign") } }
+    @Published var hyphenation: HyphenMode { didSet { d.set(hyphenation.rawValue, forKey: "hyphenation") } }
+
+    /// Sistem görünümü değişince (ya da ayar açılınca) uygun temayı uygular.
+    func applySystem(dark: Bool) {
+        systemDark = dark
+        guard followSystem else { return }
+        let t = dark ? nightTheme : dayTheme
+        if theme != t { theme = t }
+    }
+
+    /// Tema seçici: sistemle eşleşme açıkken seçim o anki görünümün (gündüz/gece) temasını belirler.
+    func chooseTheme(_ t: ReaderTheme) {
+        theme = t
+        if followSystem {
+            if systemDark { nightTheme = t } else { dayTheme = t }
+        }
+    }
+
+    func setFollowSystem(_ on: Bool, systemDark dark: Bool) {
+        systemDark = dark
+        if on {
+            if theme.isDark { nightTheme = theme } else { dayTheme = theme }
+        }
+        followSystem = on
+        if on { applySystem(dark: dark) }
+    }
     @Published var font: ReaderFont { didSet { d.set(font.rawValue, forKey: "font") } }
     /// 1.0 = 18px taban
     @Published var fontScale: Double { didSet { d.set(fontScale, forKey: "fontScale") } }
@@ -157,6 +244,8 @@ final class ReaderSettings: ObservableObject {
     @Published var readingMode: ReadingMode { didSet { d.set(readingMode.rawValue, forKey: "readingMode") } }
     /// Kaydırma modunda kenara dokununca ekran boyu atlama
     @Published var edgeTap: Bool { didSet { d.set(edgeTap, forKey: "edgeTap") } }
+    /// Okuyucu açıkken ekran kendiliğinden kapanmasın (sesli okuma sırasında kapanabilir). Varsayılan: açık.
+    @Published var keepAwake: Bool { didSet { d.set(keepAwake, forKey: "keepAwake") } }
     /// Sıcak ışık filtresi (0 = kapalı ... 1 = en sıcak)
     @Published var warmth: Double { didSet { d.set(warmth, forKey: "warmth") } }
     /// Çeviri, sözlük ve açıklamaların dili
@@ -202,6 +291,7 @@ final class ReaderSettings: ObservableObject {
         ttsShowInPage = d.bool(forKey: "ttsShowInPage")
         readingMode = ReadingMode(rawValue: d.string(forKey: "readingMode") ?? "") ?? .scroll
         edgeTap = d.bool(forKey: "edgeTap")
+        keepAwake = d.object(forKey: "keepAwake") as? Bool ?? true
         columns = ColumnMode(rawValue: d.string(forKey: "columns") ?? "") ?? .single
         translationLayout = TranslationLayout(rawValue: d.string(forKey: "translationLayout") ?? "") ?? .below
         dailyGoalMinutes = d.object(forKey: "dailyGoalMinutes") as? Int ?? 20
@@ -210,6 +300,18 @@ final class ReaderSettings: ObservableObject {
         reminderMinute = d.object(forKey: "reminderMinute") as? Int ?? 0
         vocabReminderEnabled = d.bool(forKey: "vocabReminderEnabled")
         highlightColor = HighlightColor(rawValue: d.string(forKey: "highlightColor") ?? "") ?? .yellow
+        yearlyGoal = d.object(forKey: "yearlyGoal") as? Int ?? 12
+        cropMargins = d.bool(forKey: "cropMargins")
+        bionic = d.bool(forKey: "bionic")
+        readingRuler = d.bool(forKey: "readingRuler")
+        let rf = d.double(forKey: "rulerFraction")
+        rulerFraction = rf > 0.05 && rf < 0.95 ? rf : 0.42
+        glossLevel = GlossLevel(rawValue: d.string(forKey: "glossLevel") ?? "") ?? .normal
+        followSystem = d.bool(forKey: "followSystem")
+        dayTheme = ReaderTheme(rawValue: d.string(forKey: "dayTheme") ?? "") ?? .light
+        nightTheme = ReaderTheme(rawValue: d.string(forKey: "nightTheme") ?? "") ?? .dark
+        textAlign = TextAlignMode(rawValue: d.string(forKey: "textAlign") ?? "") ?? .book
+        hyphenation = HyphenMode(rawValue: d.string(forKey: "hyphenation") ?? "") ?? .book
         penStyle = HighlightStyle(rawValue: d.string(forKey: "penStyle") ?? "") ?? .highlight
     }
 
@@ -237,6 +339,8 @@ final class ReaderSettings: ObservableObject {
         body a, body a * { text-decoration: underline !important; }
         ::selection { background: rgba(0, 0, 0, 0.25) !important; }
         """ : ""
+        let alignCSS = textAlign == .book ? "" : "body p, body li, body blockquote, body dd, body td { text-align: \(textAlign == .left ? "left" : "justify") !important; }"
+        let hyphCSS = hyphenation == .book ? "" : "body { -webkit-hyphens: \(hyphenation == .on ? "auto" : "none") !important; hyphens: \(hyphenation == .on ? "auto" : "none") !important; }"
         let fontFace = font == .bookerly ? FontInstaller.bookerlyCSS : ""
         return """
         \(fontFace)
@@ -249,6 +353,8 @@ final class ReaderSettings: ObservableObject {
                  font-family: inherit !important; line-height: inherit !important; }
         body a, body a * { color: \(t.linkHex) !important; }
         p { margin: 0 0 0.9em; }
+        \(alignCSS)
+        \(hyphCSS)
         img, svg, video { max-width: 100% !important; height: auto !important; }
         \(imgFilter)
         ::selection { background: rgba(255, 190, 60, 0.45); }
@@ -273,6 +379,12 @@ final class ReaderSettings: ObservableObject {
         body .llm-hl[data-color="blue"] { background-color: rgba(10,132,255,0.32) !important; }
         body .llm-hl[data-color="pink"] { background-color: rgba(255,55,95,0.32) !important; }
         body .llm-hl[data-color="orange"] { background-color: rgba(255,149,0,0.40) !important; }
+        b.llm-bio { font-weight: 700 !important; }
+        ruby.llm-ruby { ruby-position: over; }
+        ruby.llm-ruby rt { font-size: 0.5em !important; color: \(t.translationHex) !important; font-weight: 400 !important;
+                           font-family: -apple-system, 'SF Pro Text', sans-serif !important; line-height: 1 !important; letter-spacing: 0 !important; }
+        .llm-gl-hide rt.llm-rt { display: none !important; }
+        body .llm-find { background-color: rgba(255,120,0,0.55) !important; border-radius: 3px; }
         body .llm-hl[data-style="underline"], body .llm-hl[data-style="wavy"] { background-color: transparent !important; text-decoration-thickness: 2px; text-underline-offset: 3px; border-radius: 0; }
         body .llm-hl[data-style="underline"] { text-decoration-line: underline; text-decoration-style: solid; }
         body .llm-hl[data-style="wavy"] { text-decoration-line: underline; text-decoration-style: wavy; }

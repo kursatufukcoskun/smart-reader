@@ -149,6 +149,7 @@ fun AIPanelSheet(
                         it.bookID?.equals(draft.bookID, ignoreCase = true) == true &&
                             it.word.equals(draft.word, ignoreCase = true)
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         onClick = { vocab.add(draft, explanation = text) },
                         colors = if (saved) {
@@ -162,6 +163,8 @@ fun AIPanelSheet(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(if (saved) "Defterde (güncelle)" else "Deftere ekle")
+                    }
+                    PronounceButton(draft.word, draft.paragraph)
                     }
                 }
             }

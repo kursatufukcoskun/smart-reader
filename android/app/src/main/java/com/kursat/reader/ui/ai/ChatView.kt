@@ -46,6 +46,10 @@ fun BookChatSheet(
 
     LaunchedEffect(Unit) {
         model.refreshContext()
+        model.pendingPrompt?.let { p ->
+            model.pendingPrompt = null
+            model.send(p)
+        }
     }
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
@@ -172,7 +176,7 @@ fun BookChatSheet(
                 }
 
                 items(messages, key = { it.id }) { msg ->
-                    ChatBubble(msg)
+                    ChatBubble(msg, canSave = !isStreaming && model.saveNote != null, onSaveNote = { model.saveNote?.invoke(it) })
                 }
 
                 if (error != null) {
@@ -237,8 +241,9 @@ fun BookChatSheet(
 }
 
 @Composable
-private fun ChatBubble(message: ChatModel.Message) {
+private fun ChatBubble(message: ChatModel.Message, canSave: Boolean, onSaveNote: (String) -> Unit) {
     val isUser = message.role == ChatTurn.Role.user
+    var saved by remember(message.id) { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
@@ -258,8 +263,18 @@ private fun ChatBubble(message: ChatModel.Message) {
                         Text("Düşünüyor…", fontSize = 14.sp)
                     }
                 } else {
-                    SelectionContainer {
-                        Text(parseInlineMarkdown(message.text), fontSize = 15.sp, lineHeight = 22.sp)
+                    Column {
+                        SelectionContainer {
+                            Text(parseInlineMarkdown(message.text), fontSize = 15.sp, lineHeight = 22.sp)
+                        }
+                        if (canSave) {
+                            TextButton(
+                                onClick = { onSaveNote(message.text); saved = true },
+                                enabled = !saved
+                            ) {
+                                Text(if (saved) "✓ Konuma not olarak kaydedildi" else "📌 Bu konuma not olarak kaydet", fontSize = 13.sp)
+                            }
+                        }
                     }
                 }
             }

@@ -57,6 +57,9 @@ struct Highlight: Identifiable, Codable, Hashable {
     /// Boşsa klasik dolgulu vurgu (eski kayıtlar ve Android bu alanı yok sayar).
     var style: HighlightStyle?
     var effectiveStyle: HighlightStyle { style ?? .highlight }
+    /// nil = kullanıcının kendi vurgusu; "insight" = yapay zekâ içgörüsü (metinde işaretlenmez, yalnızca listede durur).
+    var kind: String?
+    var isInsight: Bool { kind == "insight" }
     var createdAt = Date()
 
     // EPUB konumu: bölüm + temiz metin içindeki karakter aralığı
@@ -93,6 +96,29 @@ final class HighlightStore: ObservableObject {
     private var deletedURL: URL { Paths.base.appendingPathComponent("highlights-deleted.json") }
 
     init() { load() }
+
+    /// Kullanıcının kendi vurguları (yapay zekâ içgörüleri hariç).
+    var userItems: [Highlight] { items.filter { !$0.isInsight } }
+
+    /// İçgörüleri bölüme/sayfaya ekler; aynı kitapta aynı metin varsa atlar. Eklenen sayıyı döner.
+    @discardableResult
+    func addInsights(_ texts: [String], bookID: UUID, bookTitle: String, chapter: Int?, page: Int?, location: String) -> Int {
+        var n = 0
+        for raw in texts {
+            let t = raw.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty,
+                  !items.contains(where: { $0.isInsight && $0.bookID == bookID && $0.text.caseInsensitiveCompare(t) == .orderedSame })
+            else { continue }
+            var h = Highlight(bookID: bookID, bookTitle: bookTitle, text: t)
+            h.kind = "insight"
+            h.chapter = chapter
+            h.page = page
+            h.location = location
+            add(h)
+            n += 1
+        }
+        return n
+    }
 
     func forBook(_ id: UUID) -> [Highlight] {
         items.filter { $0.bookID == id }.sorted { $0.sortKey < $1.sortKey }
@@ -149,7 +175,8 @@ final class HighlightStore: ObservableObject {
         for (_, list) in books.sorted(by: { ($0.value.first?.bookTitle ?? "") < ($1.value.first?.bookTitle ?? "") }) {
             out += "\n## \(list.first?.bookTitle ?? "")\n"
             for h in list.sorted(by: { $0.sortKey < $1.sortKey }) {
-                out += "\n> \(h.text.replacingOccurrences(of: "\n", with: " "))\n"
+                let quote = h.text.replacingOccurrences(of: "\n", with: " ")
+                out += h.isInsight ? "\n> ✨ *Yapay zekâ içgörüsü:* \(quote)\n" : "\n> \(quote)\n"
                 if !h.location.isEmpty { out += "\n*\(h.location)*\n" }
                 if !h.note.isEmpty { out += "\n**Not:** \(h.note)\n" }
             }

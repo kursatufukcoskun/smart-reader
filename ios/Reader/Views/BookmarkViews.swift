@@ -16,10 +16,10 @@ struct BookmarkList: View {
                 ForEach(items) { b in
                     Button { onSelect(b) } label: {
                         HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: "bookmark.fill").foregroundStyle(.orange)
+                            Image(systemName: b.isNote == true ? "note.text" : "bookmark.fill").foregroundStyle(.orange)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(b.snippet.isEmpty ? b.location : b.snippet)
-                                    .font(.system(size: 15, design: .serif)).lineLimit(2).multilineTextAlignment(.leading)
+                                    .font(.system(size: 15, design: .serif)).lineLimit(b.isNote == true ? 6 : 2).multilineTextAlignment(.leading)
                                 Text(b.location).font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 0)

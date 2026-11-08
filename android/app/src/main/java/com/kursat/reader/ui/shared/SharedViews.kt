@@ -82,6 +82,8 @@ import kotlin.math.roundToInt
 
 @Composable
 fun SelectionBar(
+    onXray: () -> Unit,
+    onDictionary: () -> Unit,
     onExplain: () -> Unit,
     onTranslate: () -> Unit,
     onHighlight: () -> Unit,
@@ -99,6 +101,14 @@ fun SelectionBar(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
         ) {
+            TextButton(onClick = onDictionary) {
+                Text("Sözlük", fontWeight = FontWeight.Medium)
+            }
+            Text("·", color = MaterialTheme.colorScheme.outline)
+            TextButton(onClick = onXray) {
+                Text("Kim/Ne?", fontWeight = FontWeight.Medium)
+            }
+            Text("·", color = MaterialTheme.colorScheme.outline)
             TextButton(onClick = onExplain) {
                 Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -144,6 +154,25 @@ fun ThemePanel(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Sistem görünümüyle eşle
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Sistem görünümüyle eşle", style = MaterialTheme.typography.bodyMedium)
+                if (state.followSystem) {
+                    Text(
+                        "Şu an ${if (settings.systemDark) "koyu" else "açık"} görünüm: seçtiğin tema bu görünüm için kaydedilir; görünüm değişince diğeri otomatik gelir.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            androidx.compose.material3.Switch(checked = state.followSystem, onCheckedChange = { settings.setFollowSystem(it) })
+        }
+
         // Temalar
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -153,7 +182,7 @@ fun ThemePanel(
                 val selected = state.theme == t
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.clickable { settings.update { it.copy(theme = t) } }
+                    modifier = Modifier.clickable { settings.chooseTheme(t) }
                 ) {
                     Box(
                         contentAlignment = Alignment.Center,
@@ -214,10 +243,66 @@ fun ThemePanel(
                 }
             }
             Text(
-                "Sayfa çevirisi orijinalin altında ya da yanında (geniş ekranda) görünür.",
+                "Altında/yan yana: orijinalin yanında görünür. Yerine: orijinal gizlenir, çeviri ikonuna dokununca orijinali görürsün (dar ekranda daha rahat).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        // Okuma yardımcıları (yalnızca EPUB: biyonik okuma, satır odaklayıcı, kelime ipucu yoğunluğu)
+        if (showsTextControls) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Biyonik okuma (kelime başları kalın)", style = MaterialTheme.typography.bodyMedium)
+                    Switch(checked = state.bionic, onCheckedChange = { v -> settings.update { it.copy(bionic = v) } })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Satır odaklayıcı (şerit dışını karart)", style = MaterialTheme.typography.bodyMedium)
+                    Switch(checked = state.readingRuler, onCheckedChange = { v -> settings.update { it.copy(readingRuler = v) } })
+                }
+                Text("Kelime ipucu yoğunluğu", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    com.kursat.reader.model.GlossLevel.entries.forEach { g ->
+                        FilterChip(
+                            selected = state.glossLevel == g,
+                            onClick = { settings.update { it.copy(glossLevel = g) } },
+                            label = { Text(g.title) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Hizalama ve tireleme
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Hizalama", style = MaterialTheme.typography.labelMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                com.kursat.reader.model.TextAlignMode.entries.forEach { a ->
+                    FilterChip(
+                        selected = state.textAlign == a,
+                        onClick = { settings.update { it.copy(textAlign = a) } },
+                        label = { Text(a.title) }
+                    )
+                }
+            }
+            Text("Tireleme", style = MaterialTheme.typography.labelMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                com.kursat.reader.model.HyphenMode.entries.forEach { h ->
+                    FilterChip(
+                        selected = state.hyphenation == h,
+                        onClick = { settings.update { it.copy(hyphenation = h) } },
+                        label = { Text(h.title) }
+                    )
+                }
+            }
         }
 
         // Kolon
@@ -271,6 +356,30 @@ fun ThemePanel(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Okurken ekranı açık tut", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = state.keepAwake,
+                    onCheckedChange = { v -> settings.update { it.copy(keepAwake = v) } }
+                )
+            }
+            if (!showsTextControls) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Kenar boşluklarını kırp", style = MaterialTheme.typography.bodyMedium)
+                    Switch(
+                        checked = state.cropMargins,
+                        onCheckedChange = { v -> settings.update { it.copy(cropMargins = v) } }
+                    )
+                }
             }
         }
 
@@ -448,3 +557,17 @@ fun ToastHost(
     }
 }
 
+
+
+/** Okuyucu açıkken ekranın kendiliğinden kapanmasını engeller (ayardan kapatılabilir; sesli okurken ekran kapanabilir). */
+@Composable
+fun KeepScreenAwake(settings: ReaderSettings, speech: com.kursat.reader.speech.SpeechController) {
+    val state by settings.state.collectAsState()
+    val speechState by speech.state.collectAsState()
+    val enabled = state.keepAwake && speechState == com.kursat.reader.speech.SpeechController.State.idle
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(enabled) {
+        view.keepScreenOn = enabled
+        onDispose { view.keepScreenOn = false }
+    }
+}

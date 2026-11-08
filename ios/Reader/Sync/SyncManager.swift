@@ -321,10 +321,21 @@ final class SyncManager: ObservableObject {
             let localStamp = b.progressUpdatedAt ?? .distantPast
             let remoteRec = merged[key]
             if let r = remoteRec, r.updatedAt > localStamp {
-                library.applyRemoteProgress(b.id, position: r.position, scrollFraction: r.scrollFraction, updatedAt: r.updatedAt)
-            } else if b.progressUpdatedAt != nil {
-                merged[key] = ProgressRecord(position: b.position, scrollFraction: b.scrollFraction,
-                                             progress: b.progress, updatedAt: localStamp)
+                // Bu cihazda hiç okunmadıysa ya da fark önemsizse sessizce uygula; aksi halde yerel konumu
+                // koru ve okuyucuda "Diğer cihazda şurada kaldın" diye sor.
+                if b.progressUpdatedAt == nil || !library.isSignificant(b, position: r.position, scrollFraction: r.scrollFraction) {
+                    library.clearRemoteOffer(b.id)
+                    library.applyRemoteProgress(b.id, position: r.position, scrollFraction: r.scrollFraction, updatedAt: r.updatedAt)
+                } else {
+                    library.offerRemoteProgress(b.id, .init(position: r.position, scrollFraction: r.scrollFraction,
+                                                            progress: r.progress, updatedAt: r.updatedAt))
+                }
+            } else {
+                library.clearRemoteOffer(b.id)
+                if b.progressUpdatedAt != nil {
+                    merged[key] = ProgressRecord(position: b.position, scrollFraction: b.scrollFraction,
+                                                 progress: b.progress, updatedAt: localStamp)
+                }
             }
         }
         try await push(ProgressFile(books: merged), name: name, files: files, drive: drive, remoteRaw: raw)

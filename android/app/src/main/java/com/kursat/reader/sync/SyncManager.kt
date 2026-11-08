@@ -295,16 +295,31 @@ class SyncManager(
                     val r = merged[key]
                     val remoteStamp = r?.let { IsoDate.parse(it.updatedAt) }
                     if (r != null && remoteStamp != null && remoteStamp.isAfter(localStamp)) {
+                        // Bu cihazda hiç okunmadıysa ya da fark önemsizse sessizce uygula; aksi halde yerel konumu
+                        // koru ve okuyucuda "Diğer cihazda şurada kaldın" diye sor.
                         withContext(Dispatchers.Main) {
-                            library.applyRemoteProgress(b.id, r.position, r.scrollFraction, r.updatedAt)
+                            if (b.progressUpdatedAt == null || !library.isSignificant(b, r.position, r.scrollFraction)) {
+                                library.clearRemoteOffer(b.id)
+                                library.applyRemoteProgress(b.id, r.position, r.scrollFraction, r.updatedAt)
+                            } else {
+                                library.offerRemoteProgress(
+                                    b.id,
+                                    com.kursat.reader.model.LibraryStore.RemoteProgressOffer(
+                                        r.position, r.scrollFraction, r.progress, r.updatedAt
+                                    )
+                                )
+                            }
                         }
-                    } else if (b.progressUpdatedAt != null) {
-                        merged[key] = ProgressRecord(
-                            position = b.position,
-                            scrollFraction = b.scrollFraction,
-                            progress = b.progress,
-                            updatedAt = b.progressUpdatedAt
-                        )
+                    } else {
+                        withContext(Dispatchers.Main) { library.clearRemoteOffer(b.id) }
+                        if (b.progressUpdatedAt != null) {
+                            merged[key] = ProgressRecord(
+                                position = b.position,
+                                scrollFraction = b.scrollFraction,
+                                progress = b.progress,
+                                updatedAt = b.progressUpdatedAt
+                            )
+                        }
                     }
                 }
                 push(ProgressFile(books = merged.toSortedMap()), name, files, raw)

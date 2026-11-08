@@ -45,9 +45,47 @@ final class LibraryStore: ObservableObject {
         update(cur)
     }
 
-    /// En son okunan en üstte; hiç açılmamışlar sonda (yeni eklenen önce).
+    enum Sort: String, CaseIterable, Identifiable {
+        case lastRead, added, title, author, progress
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .lastRead: return "Son okunan"
+            case .added: return "Eklenme tarihi"
+            case .title: return "Başlık"
+            case .author: return "Yazar"
+            case .progress: return "İlerleme"
+            }
+        }
+    }
+
+    /// Kitaplık sıralaması (cihaza özel).
+    @Published var sort: Sort = Sort(rawValue: UserDefaults.standard.string(forKey: "librarySort") ?? "") ?? .lastRead {
+        didSet { UserDefaults.standard.set(sort.rawValue, forKey: "librarySort") }
+    }
+
+    /// Başlık/yazar düzenlemesi: etiketlerle aynı damgayı kullanır, böylece diğer cihazlara senkronlanır.
+    func updateInfo(_ id: UUID, title: String, author: String) {
+        guard var b = book(id) else { return }
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        b.title = t
+        b.author = author.trimmingCharacters(in: .whitespacesAndNewlines)
+        b.tagsUpdatedAt = Date()
+        update(b)
+    }
+
+    /// Seçili sıralamaya göre kitaplar (varsayılan: en son okunan en üstte; hiç açılmamışlar sonda).
     var sortedBooks: [Book] {
-        books.sorted { a, b in
+        let cmp: (String, String) -> Bool = { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        switch sort {
+        case .lastRead: break
+        case .added: return books.sorted { $0.addedAt > $1.addedAt }
+        case .title: return books.sorted { cmp($0.title, $1.title) }
+        case .author: return books.sorted { $0.author.isEmpty != $1.author.isEmpty ? !$0.author.isEmpty : cmp($0.author, $1.author) }
+        case .progress: return books.sorted { $0.progress > $1.progress }
+        }
+        return books.sorted { a, b in
             switch (a.lastReadAt, b.lastReadAt) {
             case let (x?, y?): return x > y
             case (.some, nil): return true
@@ -66,6 +104,42 @@ final class LibraryStore: ObservableObject {
         // Yalnızca konum gerçekten değiştiyse "değişti" damgası vur (senkron bu damgaya bakar).
         b.progressUpdatedAt = (b.position != old.position || b.scrollFraction != old.scrollFraction) ? Date() : old.progressUpdatedAt
         books[i] = b
+        scheduleSave()
+    }
+
+    // MARK: - Başka cihazdaki konum teklifi
+
+    struct RemoteProgressOffer: Equatable {
+        var position: Int
+        var scrollFraction: Double
+        var progress: Double
+        var updatedAt: Date
+    }
+
+    /// Başka cihazda daha yeni bir konum var ve yerelden anlamlı biçimde farklı: kullanıcıya sorulur.
+    @Published private(set) var remoteOffers: [UUID: RemoteProgressOffer] = [:]
+
+    /// Uzak konum yerelden anlamlı farklıysa (bölüm/sayfa değişmiş ya da %5'ten fazla kaymış) true.
+    func isSignificant(_ b: Book, position: Int, scrollFraction: Double) -> Bool {
+        switch b.kind {
+        case .pdf: return position != b.position
+        case .epub: return position != b.position || abs(scrollFraction - b.scrollFraction) > 0.05
+        }
+    }
+
+    func offerRemoteProgress(_ id: UUID, _ offer: RemoteProgressOffer) {
+        if remoteOffers[id] != offer { remoteOffers[id] = offer }
+    }
+
+    func clearRemoteOffer(_ id: UUID) {
+        if remoteOffers[id] != nil { remoteOffers[id] = nil }
+    }
+
+    /// "Burada kal": yerel konum yeni damga alır, bir sonraki senkronda uzaktakinin yerine geçer.
+    func keepLocalProgress(_ id: UUID) {
+        remoteOffers[id] = nil
+        guard let i = books.firstIndex(where: { $0.id == id }) else { return }
+        books[i].progressUpdatedAt = Date()
         scheduleSave()
     }
 
@@ -156,6 +230,8 @@ final class LibraryStore: ObservableObject {
         for e in entries {
             if let i = books.firstIndex(where: { $0.id == e.id }) {
                 if e.updatedAt > (books[i].tagsUpdatedAt ?? books[i].addedAt) {
+                    if !e.title.isEmpty { books[i].title = e.title }
+                    books[i].author = e.author
                     books[i].tags = (e.tags ?? []).isEmpty ? nil : e.tags
                     books[i].tagsUpdatedAt = e.updatedAt
                 }

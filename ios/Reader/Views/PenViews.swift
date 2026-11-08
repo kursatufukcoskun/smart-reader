@@ -176,6 +176,8 @@ struct PenPalette: View {
 
 /// Kalemle bir yer çizilince altta görünen kısa menü.
 struct PenResultBar: View {
+    /// Çizilen yer tek kelimeyse sözlük düğmesi çıkar
+    var dictionary: (() -> Void)?
     var translate: () -> Void
     var explain: () -> Void
     var note: () -> Void
@@ -183,6 +185,13 @@ struct PenResultBar: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            if let dictionary {
+                Button(action: dictionary) {
+                    Image(systemName: "character.book.closed").padding(.horizontal, 16).padding(.vertical, 12)
+                }
+                .accessibilityLabel("Sözlük")
+                Divider().frame(height: 24)
+            }
             Button(action: translate) {
                 Label("Çevir", systemImage: "character.bubble").padding(.horizontal, 18).padding(.vertical, 12)
             }

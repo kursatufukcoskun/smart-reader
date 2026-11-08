@@ -9,6 +9,7 @@ struct ChatView: View {
     @ObservedObject var chat: ChatModel
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
+    @State private var savedNotes: Set<UUID> = []
     @FocusState private var focused: Bool
 
     private let suggestions = [
@@ -45,7 +46,13 @@ struct ChatView: View {
                     } label: { Image(systemName: "ellipsis.circle") }
                 }
             }
-            .task { await chat.refreshContext() }
+            .task {
+                await chat.refreshContext()
+                if let p = chat.pendingPrompt {
+                    chat.pendingPrompt = nil
+                    chat.send(p)
+                }
+            }
         }
     }
 
@@ -122,11 +129,27 @@ struct ChatView: View {
                 if m.text.isEmpty && chat.isStreaming {
                     ProgressView().padding(12)
                 } else {
-                    Text(chatMarkdown(m.text))
-                        .font(.system(size: 17)).lineSpacing(4)
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(chatMarkdown(m.text))
+                            .font(.system(size: 17)).lineSpacing(4)
+                            .textSelection(.enabled)
+                        if !chat.isStreaming, chat.saveNote != nil {
+                            let saved = savedNotes.contains(m.id)
+                            Button {
+                                chat.saveNote?(m.text)
+                                savedNotes.insert(m.id)
+                            } label: {
+                                Label(saved ? "Konuma not olarak kaydedildi" : "Bu konuma not olarak kaydet",
+                                      systemImage: saved ? "checkmark.circle.fill" : "pin")
+                                    .font(.footnote)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(saved ? Color.green : Color.accentColor)
+                            .disabled(saved)
+                        }
+                    }
+                    .padding(12)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 16))
                 }
                 Spacer(minLength: 40)
             }

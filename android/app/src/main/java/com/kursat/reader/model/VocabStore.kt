@@ -46,8 +46,11 @@ data class VocabEntry(
     val box: Int = 0,
     val dueAt: String = IsoDate.now(),
     val reviews: Int = 0,
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    /** null = kelime kartı; "card" = vurgudan üretilen soru/cevap kartı (word = soru, explanation = cevap). */
+    val kind: String? = null
 ) {
+    val isCard: Boolean get() = kind == "card"
     val stamp: Instant get() = IsoDate.parseOrNull(updatedAt) ?: IsoDate.parse(addedAt)
 
     val isDue: Boolean get() = IsoDate.parse(dueAt) <= Instant.now()
@@ -105,6 +108,21 @@ class VocabStore {
             it.bookID?.equals(d.bookID, ignoreCase = true) == true &&
                 it.word.equals(d.word, ignoreCase = true)
         }
+
+    /** Vurgudan üretilen soru/cevap kartı: kelime defteriyle aynı Leitner kutularında tekrar edilir. */
+    /** Aynı kitapta aynı soru zaten kartsa eklemez (false döner). */
+    fun addCard(question: String, answer: String, quote: String, bookID: String, bookTitle: String): Boolean {
+        val q = question.trim()
+        if (_entries.value.any { it.isCard && it.bookID?.equals(bookID, ignoreCase = true) == true && it.word.equals(q, ignoreCase = true) }) return false
+        val back = answer + if (quote.isEmpty()) "" else "\n\n> " + quote.replace("\n", " ")
+        val e = VocabEntry(
+            word = q, gloss = gloss(answer), explanation = back, paragraph = "",
+            bookID = bookID, bookTitle = bookTitle, updatedAt = IsoDate.now(), kind = "card"
+        )
+        _entries.value = listOf(e) + _entries.value
+        scheduleSave()
+        return true
+    }
 
     fun add(d: VocabDraft, explanation: String) {
         val gloss = gloss(explanation)

@@ -73,6 +73,38 @@ object HTMLText {
         return lines.joinToString("\n").trim()
     }
 
+    /** HTML içinde `id`'si verilen öğenin (boş bir <a>/<span> ise onu içeren paragrafın) düz metni. */
+    fun elementText(id: String, html: String): String? {
+        val esc = Regex.escape(id)
+        val re = Regex("<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*\\b(?:id|name)\\s*=\\s*[\"']" + esc + "[\"'][^>]*>")
+        val m = re.find(html) ?: return null
+        val tag = m.groupValues[1].lowercase()
+        var text = ""
+        if (tag != "a" && tag != "span") balanced(tag, m.range.last + 1, html)?.let { text = plain(it) }
+        if (text.isEmpty()) {
+            val before = html.substring(0, m.range.first)
+            val last = Regex("<(p|li|div|aside|dd|blockquote)\\b[^>]*>", RegexOption.IGNORE_CASE).findAll(before).lastOrNull()
+            if (last != null) {
+                balanced(last.groupValues[1].lowercase(), last.range.last + 1, html)?.let { text = plain(it) }
+            }
+        }
+        text = text.trim { it.isWhitespace() || it in "↩︎↩⤴↑⏎" }
+        text = text.lines().filter { it.isNotBlank() }.joinToString("\n")
+        return if (text.isEmpty()) null else text.take(6000)
+    }
+
+    private fun balanced(tag: String, start: Int, html: String): String? {
+        val re = Regex("<(/?)" + tag + "\\b[^>]*>", RegexOption.IGNORE_CASE)
+        var depth = 1
+        for (m in re.findAll(html, start)) {
+            val closing = m.groupValues[1].isNotEmpty()
+            if (!closing && m.value.endsWith("/>")) continue
+            depth += if (closing) -1 else 1
+            if (depth == 0) return html.substring(start, m.range.first)
+        }
+        return null
+    }
+
     private fun decodeEntities(s: String): String {
         var out = s
         for ((k, v) in namedEntities) {
@@ -167,9 +199,47 @@ class LibraryStore(private val context: Context) {
         update(updated)
     }
 
-    /** En son okunan en üstte; hiç açılmamışlar sonda (yeni eklenen önce). */
+    enum class Sort(val title: String) {
+        lastRead("Son okunan"), added("Eklenme tarihi"), byTitle("Başlık"), byAuthor("Yazar"), byProgress("İlerleme")
+    }
+
+    private val sortPrefs = context.getSharedPreferences("library_sort", Context.MODE_PRIVATE)
+    private val _sort = MutableStateFlow(
+        Sort.entries.firstOrNull { it.name == sortPrefs.getString("sort", null) } ?: Sort.lastRead
+    )
+    /** Kitaplık sıralaması (cihaza özel). */
+    val sort: StateFlow<Sort> = _sort.asStateFlow()
+
+    fun setSort(s: Sort) {
+        _sort.value = s
+        sortPrefs.edit().putString("sort", s.name).apply()
+    }
+
+    /** Başlık/yazar düzenlemesi: etiketlerle aynı damgayı kullanır, böylece diğer cihazlara senkronlanır. */
+    fun updateInfo(id: String, title: String, author: String) {
+        val b = book(id) ?: return
+        val t = title.trim()
+        if (t.isEmpty()) return
+        update(b.copy(title = t, author = author.trim(), tagsUpdatedAt = IsoDate.now()))
+    }
+
+    /** Seçili sıralamaya göre kitaplar (varsayılan: en son okunan en üstte; hiç açılmamışlar sonda). */
     val sortedBooks: List<Book>
-        get() = _books.value.sortedWith { a, b ->
+        get() = when (_sort.value) {
+            Sort.added -> _books.value.sortedByDescending { IsoDate.parse(it.addedAt) }
+            Sort.byTitle -> _books.value.sortedWith { a, b -> a.title.compareTo(b.title, ignoreCase = true) }
+            Sort.byAuthor -> _books.value.sortedWith { a, b ->
+                when {
+                    a.author.isEmpty() != b.author.isEmpty() -> if (a.author.isNotEmpty()) -1 else 1
+                    else -> a.author.compareTo(b.author, ignoreCase = true)
+                }
+            }
+            Sort.byProgress -> _books.value.sortedByDescending { it.progress }
+            Sort.lastRead -> lastReadSorted()
+        }
+
+    private fun lastReadSorted(): List<Book> =
+        _books.value.sortedWith { a, b ->
             val la = a.lastReadAt
             val lb = b.lastReadAt
             when {
@@ -192,6 +262,46 @@ class LibraryStore(private val context: Context) {
             progressUpdatedAt = if (changedPos) IsoDate.now() else old.progressUpdatedAt
         )
         list[i] = updated
+        _books.value = list
+        scheduleSave()
+    }
+
+    // MARK: - Başka cihazdaki konum teklifi
+
+    data class RemoteProgressOffer(
+        val position: Int,
+        val scrollFraction: Double,
+        val progress: Double,
+        val updatedAt: String
+    )
+
+    /** Başka cihazda daha yeni bir konum var ve yerelden anlamlı farklı: kullanıcıya sorulur (kitap kimliği büyük harf). */
+    private val _remoteOffers = MutableStateFlow<Map<String, RemoteProgressOffer>>(emptyMap())
+    val remoteOffers: StateFlow<Map<String, RemoteProgressOffer>> = _remoteOffers.asStateFlow()
+
+    /** Uzak konum yerelden anlamlı farklıysa (bölüm/sayfa değişmiş ya da %5'ten fazla kaymış) true. */
+    fun isSignificant(b: Book, position: Int, scrollFraction: Double): Boolean = when (b.kind) {
+        BookKind.pdf -> position != b.position
+        BookKind.epub -> position != b.position || kotlin.math.abs(scrollFraction - b.scrollFraction) > 0.05
+    }
+
+    fun offerRemoteProgress(id: String, offer: RemoteProgressOffer) {
+        val key = id.uppercase()
+        if (_remoteOffers.value[key] != offer) _remoteOffers.value = _remoteOffers.value + (key to offer)
+    }
+
+    fun clearRemoteOffer(id: String) {
+        val key = id.uppercase()
+        if (_remoteOffers.value.containsKey(key)) _remoteOffers.value = _remoteOffers.value - key
+    }
+
+    /** "Burada kal": yerel konum yeni damga alır, bir sonraki senkronda uzaktakinin yerine geçer. */
+    fun keepLocalProgress(id: String) {
+        clearRemoteOffer(id)
+        val list = _books.value.toMutableList()
+        val i = list.indexOfFirst { it.id.equals(id, ignoreCase = true) }
+        if (i < 0) return
+        list[i] = list[i].copy(progressUpdatedAt = IsoDate.now())
         _books.value = list
         scheduleSave()
     }
@@ -324,7 +434,12 @@ class LibraryStore(private val context: Context) {
                 val cur = list[i]
                 val curStamp = IsoDate.parse(cur.tagsUpdatedAt ?: cur.addedAt)
                 if (IsoDate.parse(e.updatedAt).isAfter(curStamp)) {
-                    (list as MutableList)[i] = cur.copy(tags = e.tags?.ifEmpty { null }, tagsUpdatedAt = e.updatedAt)
+                    (list as MutableList)[i] = cur.copy(
+                        title = e.title.ifEmpty { cur.title },
+                        author = e.author,
+                        tags = e.tags?.ifEmpty { null },
+                        tagsUpdatedAt = e.updatedAt
+                    )
                 }
             } else {
                 val kind = if (e.kind == "pdf") BookKind.pdf else BookKind.epub
@@ -414,6 +529,20 @@ class LibraryStore(private val context: Context) {
             book
         } finally {
             tempFile.delete()
+        }
+    }
+
+    /**
+     * Web adresinden kitap ekler: PDF/EPUB bağlantısıysa dosya olduğu gibi, web sayfasıysa makale metni
+     * ayıklanıp tek bölümlük EPUB olarak.
+     */
+    suspend fun importArticle(address: String): Book {
+        val dir = File(context.cacheDir, "articles").apply { mkdirs() }
+        val file = ArticleImporter.fetch(address, dir)
+        try {
+            return importBookFromPath(file)
+        } finally {
+            file.delete()
         }
     }
 

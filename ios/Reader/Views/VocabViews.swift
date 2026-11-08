@@ -21,6 +21,25 @@ private func highlighted(_ text: String, word: String) -> AttributedString {
 
 struct VocabView: View {
     @EnvironmentObject var vocab: VocabStore
+    @EnvironmentObject var settings: ReaderSettings
+    @StateObject private var ai = AIAssistant()
+
+    /// Bugün tekrar edilecek (vadesi gelmiş) kelimeler; en gecikenler önde, en çok 15.
+    private var storyWords: [VocabEntry] {
+        Array(vocab.entries.filter { $0.isDue && !$0.isCard }.sorted { $0.dueAt < $1.dueAt }.prefix(15))
+    }
+
+    private func makeStory() {
+        let words = storyWords
+        guard words.count >= 3 else { return }
+        ai.start(AIRequest(
+            title: "Bugünkü kelimelerle hikâye",
+            system: Prompts.assistantSystem,
+            user: Prompts.vocabStory(words.map { ($0.word, $0.gloss) }),
+            config: settings.config(.smart),
+            maxTokens: 2048,
+            cacheKey: nil))
+    }
     @State private var search = ""
     @State private var onlyDue = false
     @State private var selected: VocabEntry?
@@ -74,6 +93,11 @@ struct VocabView: View {
                 .disabled(vocab.entries.isEmpty)
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button { makeStory() } label: { Image(systemName: "text.book.closed.fill") }
+                    .disabled(storyWords.count < 3)
+                    .accessibilityLabel("Bugünkü kelimelerle hikâye")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { onlyDue.toggle() } label: {
                     Image(systemName: onlyDue ? "clock.badge.checkmark.fill" : "clock")
                 }
@@ -87,6 +111,7 @@ struct VocabView: View {
         }
         .sheet(item: $selected) { VocabDetail(entry: $0) }
         .fullScreenCover(isPresented: $studying) { ReviewView() }
+        .aiSheet(ai)
     }
 }
 
@@ -101,7 +126,10 @@ struct VocabDetail: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text(entry.word).font(.largeTitle.bold())
+                    HStack(spacing: 12) {
+                        Text(entry.word).font(.largeTitle.bold())
+                        PronounceButton(text: entry.word, context: entry.paragraph).font(.title2)
+                    }
                     Text(highlighted(entry.snippet, word: entry.word))
                         .font(.system(size: 17, design: .serif))
                         .padding(14)
@@ -174,11 +202,18 @@ struct ReviewView: View {
 
     private func card(_ e: VocabEntry) -> some View {
         VStack(spacing: 18) {
-            Text(e.word).font(.system(size: 44, weight: .bold, design: .serif)).multilineTextAlignment(.center)
-            Text(highlighted(e.snippet, word: e.word))
-                .font(.system(size: 18, design: .serif))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
+            if e.isCard {
+                Text(e.word).font(.system(size: 28, weight: .semibold, design: .serif)).multilineTextAlignment(.center)
+            } else {
+                HStack(spacing: 12) {
+                    Text(e.word).font(.system(size: 44, weight: .bold, design: .serif)).multilineTextAlignment(.center)
+                    PronounceButton(text: e.word, context: e.paragraph).font(.title2)
+                }
+                Text(highlighted(e.snippet, word: e.word))
+                    .font(.system(size: 18, design: .serif))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
             if showBack {
                 Divider()
                 ScrollView {

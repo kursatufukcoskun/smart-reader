@@ -27,7 +27,9 @@ data class Bookmark(
     val page: Int? = null,
     val location: String,
     val createdAt: String = IsoDate.now(),
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    /** Sohbet yanıtından kaydedilen not (yer imi düğmesiyle açılıp kapanan klasik yer imi değildir). */
+    val isNote: Boolean? = null
 ) {
     val stamp: Instant get() = IsoDate.parseOrNull(updatedAt) ?: IsoDate.parse(createdAt)
 

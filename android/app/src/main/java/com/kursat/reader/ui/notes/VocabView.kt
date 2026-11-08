@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.AccessTimeFilled
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Style
@@ -84,6 +85,8 @@ fun VocabView(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val app = context.applicationContext as com.kursat.reader.ReaderApplication
+    val ai = remember { com.kursat.reader.ai.AIAssistant() }
     val entries by vocab.entries.collectAsState()
     var search by remember { mutableStateOf("") }
     var onlyDue by remember { mutableStateOf(false) }
@@ -91,6 +94,24 @@ fun VocabView(
     var studying by remember { mutableStateOf(false) }
 
     val dueCount = remember(entries) { entries.count { it.isDue } }
+    // Bugün tekrar edilecek (vadesi gelmiş) kelimeler; en gecikenler önde, en çok 15.
+    val storyWords = remember(entries) {
+        entries.filter { it.isDue && !it.isCard }.sortedBy { it.dueAt }.take(15)
+    }
+    fun makeStory() {
+        if (storyWords.size < 3) return
+        val cfg = app.settings.current.config(com.kursat.reader.model.LLMTier.smart)
+        ai.start(
+            com.kursat.reader.ai.AIRequest(
+                title = "Bugünkü kelimelerle hikâye",
+                system = com.kursat.reader.ai.Prompts.assistantSystem,
+                user = com.kursat.reader.ai.Prompts.vocabStory(storyWords.map { it.word to it.gloss }),
+                config = cfg,
+                maxTokens = 2048,
+                cacheKey = null
+            )
+        )
+    }
 
     val filtered = remember(entries, search, onlyDue) {
         entries.filter { e ->
@@ -136,6 +157,9 @@ fun VocabView(
                         enabled = entries.isNotEmpty()
                     ) {
                         Icon(Icons.Default.Share, contentDescription = "Anki dışa aktar")
+                    }
+                    IconButton(onClick = { makeStory() }, enabled = storyWords.size >= 3) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = "Bugünkü kelimelerle hikâye")
                     }
                     IconButton(onClick = { onlyDue = !onlyDue }) {
                         Icon(
@@ -281,8 +305,11 @@ fun VocabView(
                         Icon(Icons.Default.Delete, contentDescription = "Sil", tint = MaterialTheme.colorScheme.error)
                     }
                 }
-                Text(entry.word, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                Surface(
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(entry.word, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                    if (!entry.isCard) com.kursat.reader.ui.shared.PronounceButton(entry.word, entry.paragraph)
+                }
+                if (!entry.isCard) Surface(
                     shape = RoundedCornerShape(12.dp),
                     tonalElevation = 3.dp,
                     modifier = Modifier.fillMaxWidth()
@@ -317,6 +344,7 @@ fun VocabView(
             onDismiss = { studying = false }
         )
     }
+    com.kursat.reader.ui.shared.AIPanelSheet(ai = ai, vocab = vocab)
 }
 
 @Composable
@@ -385,14 +413,18 @@ fun ReviewDialog(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(18.dp)
                         ) {
-                            Text(
-                                text = current.word,
-                                fontFamily = FontFamily.Serif,
-                                fontSize = 40.sp,
-                                fontWeight = FontWeight.Bold,
-                                textAlign = TextAlign.Center
-                            )
-                            Text(
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = current.word,
+                                    fontFamily = FontFamily.Serif,
+                                    fontSize = if (current.isCard) 26.sp else 40.sp,
+                                    fontWeight = if (current.isCard) FontWeight.SemiBold else FontWeight.Bold,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                if (!current.isCard) com.kursat.reader.ui.shared.PronounceButton(current.word, current.paragraph)
+                            }
+                            if (!current.isCard) Text(
                                 text = highlightWordInContext(current.snippet, current.word),
                                 fontFamily = FontFamily.Serif,
                                 fontSize = 18.sp,

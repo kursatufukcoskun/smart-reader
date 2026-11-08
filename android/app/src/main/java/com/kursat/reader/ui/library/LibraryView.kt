@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -65,6 +66,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -156,6 +158,13 @@ fun LibraryView(
     var infoMessage by remember { mutableStateOf<String?>(null) }
     var bookToDelete by remember { mutableStateOf<Book?>(null) }
     var tagBook by remember { mutableStateOf<Book?>(null) }
+    var editBook by remember { mutableStateOf<Book?>(null) }
+    var wrapBook by remember { mutableStateOf<Book?>(null) }
+    var showArticleDialog by remember { mutableStateOf(false) }
+    var articleUrl by remember { mutableStateOf("") }
+    var addMenu by remember { mutableStateOf(false) }
+    var sortMenu by remember { mutableStateOf(false) }
+    val sort by library.sort.collectAsState()
     var findingCoverId by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
 
@@ -185,7 +194,7 @@ fun LibraryView(
         }
     }
 
-    val sortedBooks = remember(books) { library.sortedBooks }
+    val sortedBooks = remember(books, sort) { library.sortedBooks }
     val allTags = remember(books) { library.allTags }
 
     val visibleBooks = remember(sortedBooks, filter, search) {
@@ -229,13 +238,46 @@ fun LibraryView(
                     IconButton(onClick = { onOpenRoute("vocab") }) {
                         Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = "Kelime defteri")
                     }
+                    Box {
+                        IconButton(onClick = { sortMenu = true }) {
+                            Icon(Icons.Default.SwapVert, contentDescription = "Sırala")
+                        }
+                        DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                            com.kursat.reader.model.LibraryStore.Sort.entries.forEach { s ->
+                                DropdownMenuItem(
+                                    text = { Text(s.title + if (s == sort) "  ✓" else "") },
+                                    onClick = { library.setSort(s); sortMenu = false }
+                                )
+                            }
+                        }
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Ayarlar")
                     }
-                    IconButton(onClick = {
-                        launcher.launch(arrayOf("application/epub+zip", "application/pdf", "application/octet-stream"))
-                    }) {
-                        Icon(Icons.Default.Add, contentDescription = "Kitap ekle")
+                    Box {
+                        IconButton(onClick = { addMenu = true }) {
+                            Icon(Icons.Default.Add, contentDescription = "Kitap ekle")
+                        }
+                        DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Dosyadan ekle (EPUB, PDF)") },
+                                onClick = {
+                                    addMenu = false
+                                    launcher.launch(arrayOf("application/epub+zip", "application/pdf", "application/octet-stream"))
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Web adresinden ekle…") },
+                                onClick = {
+                                    addMenu = false
+                                    // Panoda bir web adresi varsa hazır gelsin
+                                    val clip = (context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+                                        ?.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                                    articleUrl = com.kursat.reader.model.ArticleImporter.firstUrl(clip).orEmpty()
+                                    showArticleDialog = true
+                                }
+                            )
+                        }
                     }
                 }
             )
@@ -277,6 +319,12 @@ fun LibraryView(
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         GoalBanner(tracker = tracker, settings = settings)
                     }
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        DailyHighlightCard(onOpen = { h ->
+                            (context.applicationContext as com.kursat.reader.ReaderApplication).highlights.pendingJump = h
+                            onOpenBook(h.bookID)
+                        })
+                    }
 
                     if (books.isNotEmpty()) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
@@ -308,6 +356,8 @@ fun LibraryView(
                             isLoadingCover = findingCoverId == book.id,
                             onClick = { onOpenBook(book.id) },
                             onEditTags = { tagBook = book },
+                            onEditInfo = { editBook = book },
+                            onWrapUp = { wrapBook = book },
                             onFetchCover = {
                                 scope.launch {
                                     findingCoverId = book.id
@@ -451,6 +501,81 @@ fun LibraryView(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { bookToDelete = null }) { Text("Vazgeç") }
+            }
+        )
+    }
+
+    wrapBook?.let { b ->
+        com.kursat.reader.ui.shared.BookWrapUpSheet(book = b, onDismiss = { wrapBook = null })
+    }
+
+    // Web makalesi ekle
+    if (showArticleDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showArticleDialog = false },
+            title = { Text("Web adresinden ekle") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "PDF ya da EPUB bağlantısıysa dosya olduğu gibi eklenir; web sayfasıysa makale metni ayıklanıp tek bölümlük bir kitap olarak eklenir. Tarayıcıdan Paylaş ▸ bu uygulama ile de ekleyebilirsin.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = articleUrl, onValueChange = { articleUrl = it },
+                        label = { Text("https://…") }, singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    enabled = articleUrl.isNotBlank(),
+                    onClick = {
+                        val address = articleUrl
+                        showArticleDialog = false
+                        isImporting = true
+                        scope.launch {
+                            try {
+                                library.importArticle(address)
+                            } catch (e: Exception) {
+                                importError = e.message ?: "Makale eklenemedi"
+                            }
+                            isImporting = false
+                            sync.syncSoon()
+                        }
+                    }
+                ) { Text("Ekle") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showArticleDialog = false }) { Text("Vazgeç") }
+            }
+        )
+    }
+
+    // Başlık / yazar düzenleyici
+    editBook?.let { b ->
+        var title by remember(b.id) { mutableStateOf(b.title) }
+        var author by remember(b.id) { mutableStateOf(b.author) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { editBook = null },
+            title = { Text("Bilgileri düzenle") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = title, onValueChange = { title = it }, label = { Text("Başlık") }, singleLine = true
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = author, onValueChange = { author = it }, label = { Text("Yazar") }, singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    enabled = title.isNotBlank(),
+                    onClick = { library.updateInfo(b.id, title, author); editBook = null }
+                ) { Text("Kaydet") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { editBook = null }) { Text("Vazgeç") }
             }
         )
     }
@@ -658,16 +783,18 @@ fun BookCardItem(
     isLoadingCover: Boolean,
     onClick: () -> Unit,
     onEditTags: () -> Unit,
+    onEditInfo: () -> Unit,
+    onWrapUp: () -> Unit,
     onFetchCover: () -> Unit,
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    val coverBitmap = remember(book.coverFile) {
-        val file = Paths.cover(book)
-        if (file != null && file.exists()) {
-            BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
-        } else null
+    // Kapak: önbellekten anında, yoksa arka planda küçültülerek çözülür (kaydırmayı yavaşlatmaz)
+    val coverFile = remember(book.coverFile) { Paths.cover(book) }
+    var coverBitmap by remember(book.coverFile) { mutableStateOf(CoverCache.peek(coverFile)) }
+    LaunchedEffect(book.coverFile) {
+        if (coverBitmap == null && coverFile != null) coverBitmap = CoverCache.load(coverFile)
     }
 
     Box {
@@ -702,9 +829,10 @@ fun BookCardItem(
                         )
                     }
                 }
-                if (coverBitmap != null) {
+                val cover = coverBitmap
+                if (cover != null) {
                     Image(
-                        bitmap = coverBitmap,
+                        bitmap = cover,
                         contentDescription = book.title,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -787,6 +915,22 @@ fun BookCardItem(
             expanded = menuExpanded,
             onDismissRequest = { menuExpanded = false }
         ) {
+            DropdownMenuItem(
+                text = { Text("Kitap karnesi") },
+                leadingIcon = { Icon(Icons.Default.BarChart, contentDescription = null) },
+                onClick = {
+                    menuExpanded = false
+                    onWrapUp()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Bilgileri düzenle") },
+                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
+                onClick = {
+                    menuExpanded = false
+                    onEditInfo()
+                }
+            )
             DropdownMenuItem(
                 text = { Text("Etiketler") },
                 leadingIcon = { Icon(Icons.Default.Label, contentDescription = null) },

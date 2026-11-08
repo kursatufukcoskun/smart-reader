@@ -21,6 +21,15 @@ struct QAItem: Identifiable, Hashable {
     var answer: String
 }
 
+/// Çalışma setindeki maddeleri "içgörü" olarak vurgulara eklerken kullanılan konum bilgisi.
+struct InsightTarget {
+    var bookID: UUID
+    var bookTitle: String
+    var chapter: Int?
+    var page: Int?
+    var location: String
+}
+
 struct StudyData {
     var summary: [String] = []
     var concepts: [StudyConcept] = []
@@ -43,12 +52,14 @@ private struct StudyPayload: Decodable {
 final class ChapterStudyModel: ObservableObject, Identifiable {
     let id = UUID()
     let title: String
-    private let bookTitle: String
-    private let bookID: UUID
+    let bookTitle: String
+    let bookID: UUID
     private let text: String
     private let config: LLMConfig
     private let scopeKey: String
 
+    /// Okuyucu doldurur: içgörülerin ekleneceği bölüm/sayfa
+    var insightTarget: InsightTarget?
     @Published var data: StudyData?
     @Published var isLoading = false
     @Published var error: String?

@@ -43,6 +43,9 @@ struct EPUBReaderView: View {
     @ObservedObject var model: EPUBReaderModel
     @EnvironmentObject var settings: ReaderSettings
     @State private var showTOC = false
+    @EnvironmentObject var bookmarkStore: BookmarkStore
+    @State private var showSearch = false
+    @State private var showWrapUp = false
     @State private var showTheme = false
     @State private var showChat = false
     @State private var tocTab = 0
@@ -55,7 +58,7 @@ struct EPUBReaderView: View {
         ZStack(alignment: .bottom) {
             settings.theme.color.ignoresSafeArea()
             WebViewHost(webView: model.webView)
-                .ignoresSafeArea()
+                .ignoresSafeArea(edges: readerContentIgnoredEdges)
             if chrome {
                 bottomBar
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -66,10 +69,13 @@ struct EPUBReaderView: View {
         .persistentSystemOverlays(chrome ? .automatic : .hidden)
         .animation(.easeInOut(duration: 0.2), value: chrome)
         .readerChrome()
+        .keepScreenAwake(speech: model.speech)
         .background(SwipeBackGuard(disabled: settings.readingMode == .paged))
         .overlay(alignment: .bottom) {
             if model.hasSelection {
                 SelectionBar(
+                    xray: { model.perform(.xray) },
+                    dictionary: { model.perform(.dictionary) },
                     explain: { model.perform(.explain) },
                     translate: { model.perform(.translateParagraph) },
                     highlight: { model.perform(.highlight) },
@@ -90,6 +96,8 @@ struct EPUBReaderView: View {
         .overlay(alignment: .bottom) {
             if model.penResult != nil, !model.hasSelection {
                 PenResultBar(
+                    dictionary: model.penResult.flatMap { QuickDictionary.term(from: $0.highlight.text) } != nil
+                        ? { model.penAction(.dictionary) } : nil,
                     translate: { model.penAction(.translateParagraph) },
                     explain: { model.penAction(.explain) },
                     note: { model.penAction(.note) },
@@ -100,12 +108,30 @@ struct EPUBReaderView: View {
         }
         .overlay(alignment: .bottom) {
             if model.returnPoint != nil {
-                JumpBar(from: model.returnLabel, keep: { model.keepJump() }, back: { model.returnFromJump() })
-                    .padding(.bottom, chrome ? 124 : 82)
+                DraggableJumpBar(from: model.returnLabel, keep: { model.keepJump() }, back: { model.returnFromJump() },
+                                 bottomPadding: chrome ? 124 : 82)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeOut(duration: 0.2), value: model.returnPoint)
+        .overlay(alignment: .top) {
+            if model.remoteOffer != nil {
+                RemoteProgressBar(label: model.remoteLabel,
+                                  accept: { model.acceptRemote() },
+                                  keep: { model.keepLocalPosition() })
+                    .padding(.top, (chrome ? 56 : 8) + (model.penMode ? 54 : 0))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .top) {
+            if let d = model.resumeDays {
+                ResumeBar(days: d, ask: { model.askResume() }, dismiss: { model.dismissResume() })
+                    .padding(.top, (chrome ? 56 : 8) + (model.penMode ? 54 : 0) + (model.remoteOffer != nil ? 62 : 0))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.resumeDays)
+        .animation(.easeOut(duration: 0.2), value: model.remoteOffer)
         .animation(.easeOut(duration: 0.2), value: model.penMode)
         .animation(.easeOut(duration: 0.2), value: model.penResult)
         .onAppear {
@@ -121,12 +147,29 @@ struct EPUBReaderView: View {
         .toolbarColorScheme(settings.theme.isDark ? .dark : .light, for: .navigationBar)
         .preferredColorScheme(settings.theme.isDark ? .dark : .light)
         .toast($model.toast)
+        .relationMapSheet(model.relationMap) { model.showRelationMap() }
+        .sheet(item: $model.dictionaryTerm) { DictionarySheet(term: $0.term).ignoresSafeArea() }
+        .sheet(item: $model.footnote) { info in
+            FootnoteSheet(info: info,
+                          translate: { model.translateFootnote(info) },
+                          goTo: { model.showFootnoteInText(info) },
+                          close: { model.footnote = nil })
+                .presentationDetents([.fraction(0.4), .large])
+        }
+        .sheet(isPresented: $showSearch) {
+            BookSearchView(model: model.search, close: { showSearch = false })
+                .presentationDetents([.large])
+        }
+        .onChange(of: model.openChat) { _, v in if v { showChat = true; model.openChat = false } }
+        .onAppear { model.search.open = { [weak model] hit in showSearch = false; model?.openSearchHit(hit) } }
         .sheet(item: $model.hardWords) { HardWordsView(model: $0).presentationDetents([.large]) }
         .sheet(item: $model.study) { StudyView(model: $0).presentationDetents([.large]) }
+        .sheet(isPresented: $showWrapUp) { BookWrapUpView(book: model.book).presentationDetents([.large]) }
         .overlay(alignment: .bottom) {
             if model.atChapterEnd && !model.hasSelection {
-                Button { model.prepareStudy() } label: {
-                    Label("Bölümü pekiştir", systemImage: "graduationcap.fill")
+                Button { if model.isBookEnd { showWrapUp = true } else { model.prepareStudy() } } label: {
+                    Label(model.isBookEnd ? "Kitabı bitirdin: karneni gör" : "Bölümü pekiştir",
+                          systemImage: model.isBookEnd ? "party.popper.fill" : "graduationcap.fill")
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 18).padding(.vertical, 11)
                         .background(.regularMaterial, in: Capsule())
@@ -172,10 +215,15 @@ struct EPUBReaderView: View {
         }
         #endif
         ToolbarItem(placement: .topBarTrailing) {
+            Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }
+                .keyboardShortcut("f", modifiers: .command)
+                .accessibilityLabel("Kitapta ara")
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Button { showTOC = true } label: { Image(systemName: "list.bullet") }
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button { model.toggleBookmark() } label: { Image(systemName: "bookmark") }
+            Button { model.toggleBookmark() } label: { Image(systemName: model.isBookmarkedHere ? "bookmark.fill" : "bookmark") }
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
@@ -185,8 +233,14 @@ struct EPUBReaderView: View {
                           systemImage: model.translationsHidden ? "eye" : "eye.slash")
                 }
                 Button(role: .destructive) { model.clearTranslations() } label: { Label("Çevirileri sil", systemImage: "trash") }
+                Divider()
+                Button { model.glossVisible() } label: { Label("Zor kelimelere ipucu ekle", systemImage: "textformat.abc.dottedunderline") }
+                Button { model.toggleGlosses() } label: {
+                    Label(model.glossesHidden ? "İpuçlarını göster" : "İpuçlarını gizle", systemImage: model.glossesHidden ? "eye" : "eye.slash")
+                }
+                Button(role: .destructive) { model.clearGlosses() } label: { Label("İpuçlarını sil", systemImage: "trash") }
             } label: {
-                if model.isTranslatingPage { ProgressView() } else { Image(systemName: "character.bubble") }
+                if model.isTranslatingPage || model.isGlossing { ProgressView() } else { Image(systemName: "character.bubble") }
             }
         }
         ToolbarItem(placement: .topBarTrailing) {
@@ -199,6 +253,10 @@ struct EPUBReaderView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                Button { model.askBook(Prompts.recap) } label: { Label("Şimdiye kadar ne oldu?", systemImage: "clock.arrow.circlepath") }
+                Button { model.askBook(Prompts.cast) } label: { Label("Karakter ve kavram rehberi", systemImage: "person.2.crop.square.stack") }
+                Button { model.showRelationMap() } label: { Label("Karakter ve ilişki haritası", systemImage: "point.3.connected.trianglepath.dotted") }
+                Divider()
                 Button { model.summarizeChapter() } label: { Label("Bölümü özetle", systemImage: "text.alignleft") }
                 Button { model.prepareStudy() } label: { Label("Bölümü pekiştir (özet + quiz)", systemImage: "graduationcap") }
                 Button { model.prepareHardWords() } label: { Label("Zor kelimeler", systemImage: "list.bullet.rectangle") }
@@ -284,7 +342,9 @@ struct EPUBReaderView: View {
                     BookHighlightsList(
                         bookID: model.book.id,
                         onSelect: { h in model.goTo(h); showTOC = false },
-                        onDelete: { model.deleteHighlight($0) })
+                        onDelete: { model.deleteHighlight($0) },
+                        onInsights: { model.generateInsights() },
+                        isGeneratingInsights: model.isGeneratingInsights)
                 } else {
                     BookmarkList(
                         bookID: model.book.id,

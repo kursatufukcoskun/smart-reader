@@ -112,7 +112,16 @@ final class ReaderPDFView: PDFView {
         let grammar = UIAction(title: "Cümleyi çöz", image: UIImage(systemName: "text.badge.checkmark")) { [weak self] _ in
             self?.onMenuAction?(.grammar)
         }
-        builder.insertChild(UIMenu(title: "", options: .displayInline, children: [explain, translate, hl, note, grammar]), atStartOfMenu: .standardEdit)
+        let dict = UIAction(title: "Sözlük", image: UIImage(systemName: "character.book.closed")) { [weak self] _ in
+            self?.onMenuAction?(.dictionary)
+        }
+        let xray = UIAction(title: "Kim/Ne bu?", image: UIImage(systemName: "person.text.rectangle")) { [weak self] _ in
+            self?.onMenuAction?(.xray)
+        }
+        let critique = UIAction(title: "Eleştirel oku", image: UIImage(systemName: "scale.3d")) { [weak self] _ in
+            self?.onMenuAction?(.critique)
+        }
+        builder.insertChild(UIMenu(title: "", options: .displayInline, children: [dict, xray, explain, translate, hl, note, grammar, critique]), atStartOfMenu: .standardEdit)
     }
 }
 
@@ -139,6 +148,9 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
     let bookmarks: BookmarkStore
     @Published var toast: String?
     @Published var hardWords: HardWordsModel?
+    @Published var dictionaryTerm: DictionaryTerm?
+    let search = BookSearchModel()
+    private lazy var finder = PDFFinder(doc: document)
     @Published var study: ChapterStudyModel?
     @Published var editing: EditingHighlight?
     var onCenterTap: (() -> Void)?
@@ -147,6 +159,9 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
 
     @Published var pageIndex: Int
     @Published var hasSelection = false
+
+    /// Başka cihazda daha yeni bir konum varsa (senkron sessizce üzerine yazmaz, sorar)
+    @Published var remoteOffer: LibraryStore.RemoteProgressOffer?
 
     /// Atlamadan önceki sayfa: doluyken "kalıcı olsun mu?" çubuğu görünür.
     /// Kitap başına cihazda saklanır (senkronlanmaz); kullanıcı cevaplayana kadar kalır.
@@ -183,6 +198,7 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
             returnPage = p
         }
         chat.contextProvider = { [weak self] budget in await self?.buildChatContext(budget: budget) ?? .empty }
+        chat.saveNote = { [weak self] t in self?.saveChatNote(t) }
         speech.settings = settings
         speech.source = SpeechSource(
             paragraphs: { [weak self] in
@@ -203,7 +219,15 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &bag)
+        remoteOffer = library.remoteOffers[book.id]
+        library.$remoteOffers
+            .map { [id = book.id] in $0[id] }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.remoteOffer = $0 }
+            .store(in: &bag)
         sampleWordsPerPage()
+        defer { computeResume() }
         var nb = self.book
         nb.pagesTotal = document.pageCount
         nb.recomputeProgress()
@@ -226,6 +250,7 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         pdfView.addGestureRecognizer(penRecognizer)
         pencilTap.onTap = { [weak self] in self?.cyclePenStyle() }
         pencilTap.attach(to: pdfView)
+        search.searcher = { [weak self] q, limit in await self?.searchBook(q, limit: limit) ?? [] }
 
         if let page = document.page(at: pageIndex) {
             DispatchQueue.main.async { [weak self] in self?.pdfView.go(to: page) }
@@ -238,9 +263,10 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         pdfView.addGestureRecognizer(tap)
         settings.objectWillChange
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.applyMode() }
+            .sink { [weak self] _ in self?.applyMode(); self?.applyCrop() }
             .store(in: &bag)
         applyMode()
+        applyCrop()
 
         NotificationCenter.default.publisher(for: .PDFViewPageChanged, object: pdfView)
             .receive(on: RunLoop.main)
@@ -253,6 +279,86 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
                 self.hasSelection = !(self.pdfView.currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
             }
             .store(in: &bag)
+    }
+
+    // MARK: Kenar boşluğu kırpma
+
+    /// Belgeden örneklenen sayfalara göre ortak kırpma payları (sayfa boyutuna oranla): sol, alt, sağ, üst.
+    private var cropFractions: (l: CGFloat, b: CGFloat, r: CGFloat, t: CGFloat)?
+    private var cropComputed = false
+    private var appliedCrop: Bool?
+
+    /// Bir sayfanın küçük resminde "boş olmayan" alanın sınırlarını bulur (sayfa boyutuna oranla kenar payları).
+    private func contentMargins(of page: PDFPage) -> (l: CGFloat, b: CGFloat, r: CGFloat, t: CGFloat)? {
+        let media = page.bounds(for: .mediaBox)
+        guard media.width > 0, media.height > 0, page.rotation == 0 else { return nil }
+        let w = 220, h = max(1, Int((220 * media.height / media.width).rounded()))
+        let img = page.thumbnail(of: CGSize(width: w, height: h), for: .mediaBox)
+        guard let cg = img.cgImage else { return nil }
+        var px = [UInt8](repeating: 255, count: w * h)
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            let row = y * w
+            for x in 0..<w where px[row + x] < 235 {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        // Neredeyse boş sayfa (kapak/ayraç) örnek sayılmaz
+        let area = CGFloat((maxX - minX + 1) * (maxY - minY + 1)) / CGFloat(w * h)
+        guard area > 0.05 else { return nil }
+        // Bitmap satırları yukarıdan aşağı: minY üst kenara, maxY alt kenara yakındır.
+        return (CGFloat(minX) / CGFloat(w), CGFloat(h - 1 - maxY) / CGFloat(h),
+                CGFloat(w - 1 - maxX) / CGFloat(w), CGFloat(minY) / CGFloat(h))
+    }
+
+    private func computeCrop() {
+        cropComputed = true
+        let n = document.pageCount
+        guard n > 0 else { return }
+        let picks = Set((0..<min(16, n)).map { $0 * max(n / 16, 1) }).filter { $0 < n }
+        var l: CGFloat = 1, b: CGFloat = 1, r: CGFloat = 1, t: CGFloat = 1
+        var samples = 0
+        for i in picks {
+            guard let page = document.page(at: i), let m = contentMargins(of: page) else { continue }
+            l = min(l, m.l); b = min(b, m.b); r = min(r, m.r); t = min(t, m.t)
+            samples += 1
+        }
+        guard samples >= 2 else { return }
+        // Biraz nefes payı bırak ve en fazla %30 kırp
+        let pad: CGFloat = 0.012
+        func f(_ v: CGFloat) -> CGFloat { min(0.30, max(0, v - pad)) }
+        let res = (l: f(l), b: f(b), r: f(r), t: f(t))
+        if res.l + res.r > 0.01 || res.t + res.b > 0.01 { cropFractions = res }
+    }
+
+    private func applyCrop() {
+        let on = settings.cropMargins
+        guard appliedCrop != on else { return }
+        appliedCrop = on
+        if on && !cropComputed { computeCrop() }
+        let current = pdfView.currentPage
+        for i in 0..<document.pageCount {
+            guard let page = document.page(at: i), page.rotation == 0 else { continue }
+            let media = page.bounds(for: .mediaBox)
+            if on, let f = cropFractions {
+                page.setBounds(CGRect(x: media.minX + media.width * f.l, y: media.minY + media.height * f.b,
+                                      width: media.width * (1 - f.l - f.r), height: media.height * (1 - f.t - f.b)), for: .cropBox)
+            } else {
+                page.setBounds(media, for: .cropBox)
+            }
+        }
+        pdfView.displayBox = .cropBox
+        pdfView.layoutDocumentView()
+        if let current { DispatchQueue.main.async { [weak self] in self?.pdfView.go(to: current) } }
     }
 
     private var appliedKey: String?
@@ -363,6 +469,22 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         }
         guard let sel = context ?? selectionContext() else { return }
         switch action {
+        case .xray:
+            askBook(Prompts.xray(sel.text))
+        case .critique:
+            ai.start(AIRequest(
+                title: "Eleştirel okuma",
+                system: Prompts.assistantSystem,
+                user: Prompts.critique(passage: sel.text, paragraph: sel.paragraph, bookTitle: book.title),
+                config: settings.config(.smart),
+                cacheKey: ResponseCache.key("critique", settings.config(.smart).cacheID, sel.text, sel.paragraph)))
+        case .dictionary:
+            if let term = QuickDictionary.term(from: sel.text), QuickDictionary.hasDefinition(term) {
+                dictionaryTerm = DictionaryTerm(term: term)
+            } else {
+                if QuickDictionary.term(from: sel.text) != nil { toast = "Sözlükte yok, yapay zekâya soruluyor" }
+                perform(.explain, context: sel)
+            }
         case .explain:
             ai.start(AIRequest(
                 title: sel.text.count > 40 ? String(sel.text.prefix(40)) + "…" : sel.text,
@@ -392,8 +514,21 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         }
     }
 
+    /// Sohbet yanıtını bulunduğun sayfaya not olarak yer imlerine kaydeder.
+    func saveChatNote(_ text: String) {
+        let clean = text.replacingOccurrences(of: "**", with: "")
+        bookmarks.add(Bookmark(bookID: book.id, bookTitle: book.title, snippet: String(clean.prefix(1500)),
+                               page: pageIndex, location: "📌 Sayfa \(pageIndex + 1) / \(pageCount)", isNote: true))
+        toast = "Not kaydedildi"
+    }
+
+    /// Bu sayfada klasik bir yer imi var mı?
+    var isBookmarkedHere: Bool {
+        bookmarks.forBook(book.id).contains { $0.isNote != true && $0.page == pageIndex }
+    }
+
     func toggleBookmark() {
-        if let existing = bookmarks.forBook(book.id).first(where: { $0.page == pageIndex }) {
+        if let existing = bookmarks.forBook(book.id).first(where: { $0.isNote != true && $0.page == pageIndex }) {
             bookmarks.delete([existing.id])
             toast = "Yer imi kaldırıldı"
             return
@@ -415,8 +550,42 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
             toast = "Bu sayfalarda yeterli metin yok"
             return
         }
-        study = ChapterStudyModel(title: "Sayfa \(start + 1)–\(pageIndex + 1)", text: t, book: book,
+        let m = ChapterStudyModel(title: "Sayfa \(start + 1)–\(pageIndex + 1)", text: t, book: book,
                                   config: settings.config(.smart), scopeKey: "p\(start)-\(pageIndex)")
+        m.insightTarget = InsightTarget(bookID: book.id, bookTitle: book.title, chapter: nil, page: pageIndex,
+                                        location: "Sayfa \(start + 1)–\(pageIndex + 1)")
+        study = m
+    }
+
+    @Published var isGeneratingInsights = false
+
+    /// Son 5 sayfadan yapay zekâ ile 3-5 içgörü çıkarıp vurgular listesine (✨ ile ayrı) ekler.
+    func generateInsights() {
+        guard !isGeneratingInsights else { return }
+        let start = max(0, pageIndex - 4)
+        let t = text(ofPages: start..<(pageIndex + 1))
+        guard t.trimmingCharacters(in: .whitespacesAndNewlines).count > 300 else {
+            toast = "Bu sayfalarda içgörü için yeterli metin yok"
+            return
+        }
+        isGeneratingInsights = true
+        let config = settings.config(.smart)
+        let page = pageIndex
+        let scope = "Sayfa \(start + 1)–\(page + 1)"
+        Task {
+            defer { isGeneratingInsights = false }
+            do {
+                let out = try await LLMClient.complete(config, system: Prompts.assistantSystem,
+                                                       user: Prompts.insights(text: String(t.prefix(80_000)), bookTitle: book.title, scope: scope),
+                                                       maxTokens: 1200)
+                let n = highlights.addInsights(Prompts.parseInsights(out), bookID: book.id, bookTitle: book.title,
+                                               chapter: nil, page: page, location: scope)
+                toast = n > 0 ? "\(n) içgörü eklendi" : "Yeni içgörü çıkmadı"
+            } catch {
+                ai.error = error.localizedDescription
+                ai.title = "İçgörü"; ai.text = ""; ai.isPresented = true
+            }
+        }
     }
 
     func prepareHardWords(pages count: Int) {
@@ -499,6 +668,82 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
         }
         if openNote, let h = first { editing = EditingHighlight(highlight: h, focusNote: true) }
         return first
+    }
+
+    // MARK: Kitapta arama
+
+    private func searchBook(_ q: String, limit: Int) async -> [SearchHit] {
+        let sels = await finder.find(q, limit: limit)
+        return sels.compactMap { sel -> SearchHit? in
+            guard let page = sel.pages.first else { return nil }
+            let idx = document.index(for: page)
+            let matchText = sel.string ?? q
+            var before = "", after = ""
+            if let line = sel.copy() as? PDFSelection {
+                line.extendForLineBoundaries()
+                let full = SearchText.collapse(line.string ?? "")
+                if let r = full.range(of: SearchText.collapse(matchText), options: [.caseInsensitive, .diacriticInsensitive]) {
+                    before = String(full[..<r.lowerBound].suffix(50))
+                    after = String(full[r.upperBound...].prefix(70))
+                }
+            }
+            var h = SearchHit(location: "Sayfa \(idx + 1)", before: before, match: SearchText.collapse(matchText), after: after)
+            h.page = idx
+            h.selection = sel
+            return h
+        }
+    }
+
+    func openSearchHit(_ hit: SearchHit) {
+        guard let page = hit.page, let sel = hit.selection else { return }
+        jump(to: page)
+        sel.color = UIColor.systemOrange.withAlphaComponent(0.55)
+        pdfView.highlightedSelections = [sel]
+        if let p = document.page(at: page) {
+            let b = sel.bounds(for: p)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.pdfView.go(to: b.insetBy(dx: -40, dy: -120), on: p) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            if self?.pdfView.highlightedSelections?.first === sel { self?.pdfView.highlightedSelections = nil }
+        }
+    }
+
+    // MARK: Kitaba hazır soru
+
+    /// Uzun aradan sonra açılınca "son kaldığın yeri hatırlat" önerisi için geçen gün sayısı (nil: gösterme)
+    @Published var resumeDays: Int?
+
+    private func computeResume() {
+        guard !book.isUnread, book.progress < 0.98, let t = book.progressUpdatedAt else { return }
+        let d = Calendar.current.dateComponents([.day], from: t, to: Date()).day ?? 0
+        guard d >= 3 else { return }
+        resumeDays = d
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            self?.resumeDays = nil
+        }
+    }
+
+    func askResume() {
+        resumeDays = nil
+        askBook(Prompts.resume)
+    }
+
+    func dismissResume() { resumeDays = nil }
+
+    @Published var openChat = false
+
+    let relationMap = RelationMapModel()
+
+    func showRelationMap() {
+        relationMap.start(bookTitle: book.title, settings: settings) { [weak self] budget in
+            await self?.buildChatContext(budget: budget) ?? .empty
+        }
+    }
+
+    func askBook(_ prompt: String) {
+        chat.pendingPrompt = prompt
+        openChat = true
     }
 
     // MARK: Apple Pencil
@@ -608,6 +853,18 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
 
     func keepJump() { returnPage = nil }
 
+    // MARK: Başka cihazdaki konum
+
+    var remoteLabel: String { remoteOffer.map { "Sayfa \($0.position + 1)" } ?? "" }
+
+    func acceptRemote() {
+        guard let o = remoteOffer else { return }
+        library.clearRemoteOffer(book.id)
+        jump(to: o.position)   // önceki sayfa dönüş noktası olarak saklanır
+    }
+
+    func keepLocalPosition() { library.keepLocalProgress(book.id) }
+
     func returnFromJump() {
         guard let p = returnPage else { return }
         returnPage = nil
@@ -616,6 +873,8 @@ final class PDFReaderModel: NSObject, ObservableObject, UIGestureRecognizerDeleg
 
     /// Görünüm yerleştikten sonra sayfaya gider (kitap yeni açıldığında).
     func openAfterLayout(page: Int) {
+        // Kaldığın sayfa dönüş noktası olarak saklanır ("Geri dön" ile dönebilirsin)
+        if page != pageIndex, !book.isUnread, returnPage == nil { returnPage = pageIndex }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.go(to: page) }
     }
 
@@ -701,6 +960,8 @@ struct PDFReaderView: View {
     @ObservedObject var model: PDFReaderModel
     @EnvironmentObject var settings: ReaderSettings
     @State private var showTheme = false
+    @State private var showSearch = false
+    @State private var showWrapUp = false
     @State private var showChat = false
     @State private var showHighlights = false
     @State private var notesTab = 0
@@ -714,7 +975,7 @@ struct PDFReaderView: View {
             settings.theme.color.ignoresSafeArea()
             PDFViewHost(pdfView: model.pdfView)
                 .modifier(PDFThemeModifier(theme: settings.theme))
-                .ignoresSafeArea()
+                .ignoresSafeArea(edges: readerContentIgnoredEdges)
             if chrome {
                 bottomBar
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -725,10 +986,13 @@ struct PDFReaderView: View {
         .persistentSystemOverlays(chrome ? .automatic : .hidden)
         .animation(.easeInOut(duration: 0.2), value: chrome)
         .readerChrome()
+        .keepScreenAwake(speech: model.speech)
         .background(SwipeBackGuard(disabled: settings.readingMode == .paged))
         .overlay(alignment: .bottom) {
             if model.hasSelection {
                 SelectionBar(
+                    xray: { model.perform(.xray) },
+                    dictionary: { model.perform(.dictionary) },
                     explain: { model.perform(.explain) },
                     translate: { model.perform(.translateParagraph) },
                     highlight: { model.perform(.highlight) },
@@ -749,6 +1013,8 @@ struct PDFReaderView: View {
         .overlay(alignment: .bottom) {
             if model.penResult != nil, !model.hasSelection {
                 PenResultBar(
+                    dictionary: model.penResult.flatMap { QuickDictionary.term(from: $0.highlight.text) } != nil
+                        ? { model.penAction(.dictionary) } : nil,
                     translate: { model.penAction(.translateParagraph) },
                     explain: { model.penAction(.explain) },
                     note: { model.penAction(.note) },
@@ -759,12 +1025,30 @@ struct PDFReaderView: View {
         }
         .overlay(alignment: .bottom) {
             if let rp = model.returnPage {
-                JumpBar(from: "Sayfa \(rp + 1)", keep: { model.keepJump() }, back: { model.returnFromJump() })
-                    .padding(.bottom, chrome ? 124 : 82)
+                DraggableJumpBar(from: "Sayfa \(rp + 1)", keep: { model.keepJump() }, back: { model.returnFromJump() },
+                                 bottomPadding: chrome ? 124 : 82)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeOut(duration: 0.2), value: model.returnPage)
+        .overlay(alignment: .top) {
+            if model.remoteOffer != nil {
+                RemoteProgressBar(label: model.remoteLabel,
+                                  accept: { model.acceptRemote() },
+                                  keep: { model.keepLocalPosition() })
+                    .padding(.top, (chrome ? 56 : 8) + (model.penMode ? 54 : 0))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay(alignment: .top) {
+            if let d = model.resumeDays {
+                ResumeBar(days: d, ask: { model.askResume() }, dismiss: { model.dismissResume() })
+                    .padding(.top, (chrome ? 56 : 8) + (model.penMode ? 54 : 0) + (model.remoteOffer != nil ? 62 : 0))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.resumeDays)
+        .animation(.easeOut(duration: 0.2), value: model.remoteOffer)
         .animation(.easeOut(duration: 0.2), value: model.penMode)
         .animation(.easeOut(duration: 0.2), value: model.penResult)
         .overlay(alignment: .bottom) {
@@ -793,7 +1077,12 @@ struct PDFReaderView: View {
             }
             #endif
             ToolbarItem(placement: .topBarTrailing) {
-                Button { model.toggleBookmark() } label: { Image(systemName: "bookmark") }
+                Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .accessibilityLabel("Kitapta ara")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { model.toggleBookmark() } label: { Image(systemName: model.isBookmarkedHere ? "bookmark.fill" : "bookmark") }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showHighlights = true } label: { Image(systemName: "highlighter") }
@@ -811,6 +1100,10 @@ struct PDFReaderView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button("Şimdiye kadar ne oldu?") { model.askBook(Prompts.recap) }
+                    Button("Karakter ve kavram rehberi") { model.askBook(Prompts.cast) }
+                    Button("Karakter ve ilişki haritası") { model.showRelationMap() }
+                    Divider()
                     Button("Bu sayfayı özetle") { model.summarize(pages: 1) }
                     Button("Bu sayfadan itibaren 5 sayfa") { model.summarize(pages: 5) }
                     Button("Bu sayfadan itibaren 15 sayfa") { model.summarize(pages: 15) }
@@ -832,8 +1125,31 @@ struct PDFReaderView: View {
         .toolbarColorScheme(settings.theme.isDark ? .dark : .light, for: .navigationBar)
         .preferredColorScheme(settings.theme.isDark ? .dark : .light)
         .aiSheet(model.ai)
+        .sheet(isPresented: $showWrapUp) { BookWrapUpView(book: model.book).presentationDetents([.large]) }
+        .overlay(alignment: .bottom) {
+            if model.pageIndex >= model.pageCount - 1 && model.pageCount > 1 && !model.hasSelection {
+                Button { showWrapUp = true } label: {
+                    Label("Kitabı bitirdin: karneni gör", systemImage: "party.popper.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 18).padding(.vertical, 11)
+                        .background(.regularMaterial, in: Capsule())
+                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, chrome ? 124 : 82)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
         .toast($model.toast)
         .sheet(item: $model.hardWords) { HardWordsView(model: $0).presentationDetents([.large]) }
+        .relationMapSheet(model.relationMap) { model.showRelationMap() }
+        .sheet(item: $model.dictionaryTerm) { DictionarySheet(term: $0.term).ignoresSafeArea() }
+        .sheet(isPresented: $showSearch) {
+            BookSearchView(model: model.search, close: { showSearch = false })
+                .presentationDetents([.large])
+        }
+        .onChange(of: model.openChat) { _, v in if v { showChat = true; model.openChat = false } }
+        .onAppear { model.search.open = { [weak model] hit in showSearch = false; model?.openSearchHit(hit) } }
         .sheet(item: $model.study) { StudyView(model: $0).presentationDetents([.large]) }
         .sheet(isPresented: $showChat) { ChatView(chat: model.chat).presentationDetents([.large]) }
         .sheet(isPresented: $showHighlights) {
@@ -849,7 +1165,9 @@ struct PDFReaderView: View {
                         BookHighlightsList(
                             bookID: model.book.id,
                             onSelect: { h in model.goTo(h); showHighlights = false },
-                            onDelete: { model.deleteHighlight($0) })
+                            onDelete: { model.deleteHighlight($0) },
+                            onInsights: { model.generateInsights() },
+                            isGeneratingInsights: model.isGeneratingInsights)
                     } else {
                         BookmarkList(
                             bookID: model.book.id,

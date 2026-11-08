@@ -36,6 +36,10 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
     /// Çevrilerek okunan paragrafın çevirisi (oynatıcıda altyazı olarak gösterilir).
     @Published private(set) var caption: String?
 
+    /// Uyku zamanlayıcısı: süre dolunca ya da bölüm bitince okuma durur.
+    @Published private(set) var sleepEnd: Date?
+    @Published private(set) var sleepAtChapterEnd = false
+
     weak var settings: ReaderSettings?
     var source: SpeechSource?
 
@@ -68,6 +72,33 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
     }
 
     var isActive: Bool { state != .idle }
+
+    // MARK: - Uyku zamanlayıcısı
+
+    func setSleep(minutes: Int) {
+        sleepAtChapterEnd = false
+        sleepEnd = Date().addingTimeInterval(TimeInterval(minutes * 60))
+    }
+
+    func setSleepAtChapterEnd() {
+        sleepEnd = nil
+        sleepAtChapterEnd = true
+    }
+
+    func clearSleep() {
+        sleepEnd = nil
+        sleepAtChapterEnd = false
+    }
+
+    private var sleepExpired: Bool {
+        if let end = sleepEnd, Date() >= end { return true }
+        return false
+    }
+
+    private func stopForSleep(_ why: String) {
+        stop()
+        notice = why
+    }
 
     // MARK: - Kontrol
 
@@ -133,6 +164,7 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
         state = .idle
         index = 0
         count = 0
+        clearSleep()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         setRemote(enabled: false)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -167,7 +199,9 @@ final class SpeechController: NSObject, ObservableObject, AVSpeechSynthesizerDel
 
     private func run() async {
         while !Task.isCancelled {
+            if sleepExpired { stopForSleep("Uyku zamanlayıcısı doldu, okuma durdu."); return }
             if index >= units.count {
+                if sleepAtChapterEnd { stopForSleep("Bölüm bitti, okuma durdu."); return }
                 guard let source, await source.advance(), !Task.isCancelled else { break }
                 let r = await source.paragraphs()
                 if Task.isCancelled { return }
@@ -485,6 +519,29 @@ struct SpeechBar: View {
                 } label: {
                     Text(String(format: "%.2g×", settings.ttsRate)).font(.footnote.monospacedDigit())
                 }
+                Menu {
+                    Button("15 dakika") { speech.setSleep(minutes: 15) }
+                    Button("30 dakika") { speech.setSleep(minutes: 30) }
+                    Button("45 dakika") { speech.setSleep(minutes: 45) }
+                    Button("60 dakika") { speech.setSleep(minutes: 60) }
+                    Button("Bölüm sonunda durdur") { speech.setSleepAtChapterEnd() }
+                    if speech.sleepEnd != nil || speech.sleepAtChapterEnd {
+                        Button("Zamanlayıcıyı kapat", role: .destructive) { speech.clearSleep() }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: speech.sleepEnd != nil || speech.sleepAtChapterEnd ? "moon.zzz.fill" : "moon.zzz")
+                        if let end = speech.sleepEnd {
+                            TimelineView(.periodic(from: .now, by: 15)) { ctx in
+                                Text("\(max(1, Int((end.timeIntervalSince(ctx.date) / 60).rounded(.up)))) dk")
+                                    .font(.caption2.monospacedDigit())
+                            }
+                        } else if speech.sleepAtChapterEnd {
+                            Text("bölüm").font(.caption2)
+                        }
+                    }
+                }
+                .accessibilityLabel("Uyku zamanlayıcısı")
                 if let busy = speech.busy {
                     HStack(spacing: 4) { ProgressView().controlSize(.small); Text(busy).font(.caption2) }
                         .foregroundStyle(.secondary)

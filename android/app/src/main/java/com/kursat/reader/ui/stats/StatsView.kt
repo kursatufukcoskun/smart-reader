@@ -87,6 +87,8 @@ fun StatsView(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            item { YearlyGoalCard(library = library, tracker = tracker, settings = settings) }
+            item { ReadingHeatmapCard(tracker = tracker, bookID = selectedBookID) }
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

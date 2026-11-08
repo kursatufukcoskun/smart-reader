@@ -1,5 +1,10 @@
 import SwiftUI
 
+/// Kart metni için biçim işaretlerini temizler.
+private func plain(_ s: String) -> String {
+    s.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 private func md(_ s: String) -> AttributedString {
     let o = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
     return (try? AttributedString(markdown: s, options: o)) ?? AttributedString(s)
@@ -23,9 +28,9 @@ struct StudyView: View {
 
                 if let d = model.data {
                     switch tab {
-                    case 0: SummaryTab(data: d)
-                    case 1: QuizTab(questions: d.quiz)
-                    default: QATab(items: d.qa)
+                    case 0: SummaryTab(data: d, bookID: model.bookID, bookTitle: model.bookTitle, target: model.insightTarget)
+                    case 1: QuizTab(questions: d.quiz, bookID: model.bookID, bookTitle: model.bookTitle)
+                    default: QATab(items: d.qa, bookID: model.bookID, bookTitle: model.bookTitle)
                     }
                 } else {
                     Spacer()
@@ -71,12 +76,40 @@ struct StudyView: View {
 
 private struct SummaryTab: View {
     let data: StudyData
+    let bookID: UUID
+    let bookTitle: String
+    var target: InsightTarget?
+    @EnvironmentObject var vocab: VocabStore
+    @EnvironmentObject var highlights: HighlightStore
+    @State private var added: Set<UUID> = []
+    @State private var info: String?
+
+    /// Maddeleri yapay zekâ içgörüsü olarak vurgular listesine ekler.
+    private func addInsights(_ texts: [String]) {
+        guard let t = target else { return }
+        let n = highlights.addInsights(texts, bookID: t.bookID, bookTitle: t.bookTitle, chapter: t.chapter, page: t.page, location: t.location)
+        info = n > 0 ? "\(n) içgörü vurgulara eklendi" : "Bunlar zaten vurgularında"
+    }
+
+    private func add(_ c: StudyConcept) -> Bool {
+        let ok = vocab.addCard(question: "\(plain(c.term)) nedir?", answer: plain(c.definition), quote: "", bookID: bookID, bookTitle: bookTitle)
+        added.insert(c.id)
+        return ok
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !data.summary.isEmpty {
-                    Text("Bu bölümde neler öğrendik").font(.title3.bold())
+                    HStack {
+                        Text("Bu bölümde neler öğrendik").font(.title3.bold())
+                        Spacer()
+                        if target != nil {
+                            Button { addInsights(data.summary) } label: { Label("Vurgulara ekle", systemImage: "sparkles") }
+                                .font(.footnote)
+                        }
+                    }
+                    if let info { Text(info).font(.footnote).foregroundStyle(.secondary) }
                     ForEach(Array(data.summary.enumerated()), id: \.offset) { _, s in
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).padding(.top, 2)
@@ -86,11 +119,37 @@ private struct SummaryTab: View {
                 }
                 if !data.concepts.isEmpty {
                     Divider()
-                    Text("Temel kavramlar").font(.title3.bold())
+                    HStack {
+                        Text("Temel kavramlar").font(.title3.bold())
+                        Spacer()
+                        Button {
+                            let n = data.concepts.filter { add($0) }.count
+                            info = n > 0 ? "\(n) kart tekrar defterine eklendi" : "Bu kavramlar zaten defterde"
+                        } label: { Label("Hepsini ekle", systemImage: "rectangle.on.rectangle.angled") }
+                            .font(.footnote)
+                    }
+                    if let info { Text(info).font(.footnote).foregroundStyle(.secondary) }
                     ForEach(data.concepts) { c in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(c.term).font(.headline)
                             Text(md(c.definition)).font(.system(size: 16)).foregroundStyle(.secondary)
+                            Button {
+                                info = add(c) ? "Kart tekrar defterine eklendi" : "Bu kart zaten defterde"
+                            } label: {
+                                Label(added.contains(c.id) ? "Defterde" : "Tekrar defterine ekle",
+                                      systemImage: added.contains(c.id) ? "checkmark.circle.fill" : "plus.circle")
+                                    .font(.footnote)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(added.contains(c.id) ? Color.green : Color.accentColor)
+                            .padding(.top, 2)
+                            if target != nil {
+                                Button { addInsights(["\(plain(c.term)): \(plain(c.definition))"]) } label: {
+                                    Label("Vurgulara ekle", systemImage: "sparkles").font(.footnote)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.purple)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
@@ -106,14 +165,20 @@ private struct SummaryTab: View {
 
 private struct QuizTab: View {
     let questions: [QuizQuestion]
+    let bookID: UUID
+    let bookTitle: String
+    @EnvironmentObject var vocab: VocabStore
+    @State private var wrongInfo: String?
     @State private var order: [QuizQuestion]
     @State private var index = 0
     @State private var picked: Int?
     @State private var wrong: [QuizQuestion] = []
     @State private var score = 0
 
-    init(questions: [QuizQuestion]) {
+    init(questions: [QuizQuestion], bookID: UUID, bookTitle: String) {
         self.questions = questions
+        self.bookID = bookID
+        self.bookTitle = bookTitle
         _order = State(initialValue: questions.shuffled())
     }
 
@@ -215,6 +280,20 @@ private struct QuizTab: View {
                 }
                 Button { restart(questions) } label: { Text("Baştan başla").frame(maxWidth: 320).padding(.vertical, 6) }
                     .buttonStyle(.bordered)
+                if !wrong.isEmpty {
+                    Button {
+                        let n = wrong.filter { q in
+                            let answer = plain(q.options[q.correct]) + (q.explanation.isEmpty ? "" : "\n\n" + plain(q.explanation))
+                            return vocab.addCard(question: plain(q.question), answer: answer, quote: "", bookID: bookID, bookTitle: bookTitle)
+                        }.count
+                        wrongInfo = n > 0 ? "\(n) yanlış soru tekrar kartlarına eklendi" : "Bu sorular zaten defterde"
+                    } label: {
+                        Label("Yanlışlarımı tekrar kartlarına ekle (\(wrong.count))", systemImage: "rectangle.on.rectangle.angled")
+                            .frame(maxWidth: 320).padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    if let wrongInfo { Text(wrongInfo).font(.footnote).foregroundStyle(.secondary) }
+                }
 
                 if !wrong.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
@@ -239,7 +318,18 @@ private struct QuizTab: View {
 
 private struct QATab: View {
     let items: [QAItem]
+    let bookID: UUID
+    let bookTitle: String
+    @EnvironmentObject var vocab: VocabStore
     @State private var shown: Set<UUID> = []
+    @State private var added: Set<UUID> = []
+    @State private var info: String?
+
+    private func add(_ item: QAItem) -> Bool {
+        let ok = vocab.addCard(question: plain(item.question), answer: plain(item.answer), quote: "", bookID: bookID, bookTitle: bookTitle)
+        added.insert(item.id)
+        return ok
+    }
 
     var body: some View {
         if items.isEmpty {
@@ -247,7 +337,16 @@ private struct QATab: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Önce kendin cevapla, sonra kartı açıp karşılaştır.").font(.footnote).foregroundStyle(.secondary)
+                    HStack {
+                        Text("Önce kendin cevapla, sonra kartı açıp karşılaştır.").font(.footnote).foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            let n = items.filter { add($0) }.count
+                            info = n > 0 ? "\(n) kart tekrar defterine eklendi" : "Bu kartlar zaten defterde"
+                        } label: { Label("Hepsini ekle", systemImage: "rectangle.on.rectangle.angled") }
+                            .font(.footnote)
+                    }
+                    if let info { Text(info).font(.footnote).foregroundStyle(.secondary) }
                     ForEach(items) { item in
                         let open = shown.contains(item.id)
                         VStack(alignment: .leading, spacing: 10) {
@@ -255,6 +354,15 @@ private struct QATab: View {
                             if open {
                                 Divider()
                                 Text(md(item.answer)).font(.system(size: 16)).lineSpacing(4).textSelection(.enabled)
+                                Button {
+                                    info = add(item) ? "Kart tekrar defterine eklendi" : "Bu kart zaten defterde"
+                                } label: {
+                                    Label(added.contains(item.id) ? "Defterde" : "Tekrar defterine ekle",
+                                          systemImage: added.contains(item.id) ? "checkmark.circle.fill" : "plus.circle")
+                                        .font(.footnote)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(added.contains(item.id) ? Color.green : Color.accentColor)
                             } else {
                                 Label("Cevabı göster", systemImage: "eye").font(.footnote).foregroundStyle(Color.accentColor)
                             }

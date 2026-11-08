@@ -70,6 +70,32 @@ class SpeechController(context: Context, private val settings: ReaderSettings) {
     private val _count = MutableStateFlow(0)
     val count: StateFlow<Int> = _count.asStateFlow()
     /** Çevrilerek okunan paragrafın çevirisi (oynatıcıda altyazı olarak gösterilir). */
+    /** Uyku zamanlayıcısı: süre dolunca ya da bölüm bitince okuma durur (bitiş: epoch ms). */
+    private val _sleepEnd = MutableStateFlow<Long?>(null)
+    val sleepEnd: StateFlow<Long?> = _sleepEnd.asStateFlow()
+    private val _sleepAtChapterEnd = MutableStateFlow(false)
+    val sleepAtChapterEnd: StateFlow<Boolean> = _sleepAtChapterEnd.asStateFlow()
+
+    fun setSleep(minutes: Int) {
+        _sleepAtChapterEnd.value = false
+        _sleepEnd.value = System.currentTimeMillis() + minutes * 60_000L
+    }
+
+    fun setSleepAtChapterEnd() {
+        _sleepEnd.value = null
+        _sleepAtChapterEnd.value = true
+    }
+
+    fun clearSleep() {
+        _sleepEnd.value = null
+        _sleepAtChapterEnd.value = false
+    }
+
+    private fun stopForSleep(why: String) {
+        stop()
+        _notice.value = why
+    }
+
     private val _caption = MutableStateFlow<String?>(null)
     val caption: StateFlow<String?> = _caption.asStateFlow()
 
@@ -177,6 +203,7 @@ class SpeechController(context: Context, private val settings: ReaderSettings) {
         _state.value = State.idle
         _index.value = 0
         _count.value = 0
+        clearSleep()
         abandonFocus()
         SpeechService.stop(app)
         if (active === this) active = null
@@ -225,7 +252,16 @@ class SpeechController(context: Context, private val settings: ReaderSettings) {
     private suspend fun run() {
         val src = source ?: return
         while (coroutineContext.isActive) {
+            val end = _sleepEnd.value
+            if (end != null && System.currentTimeMillis() >= end) {
+                stopForSleep("Uyku zamanlayıcısı doldu, okuma durdu.")
+                return
+            }
             if (_index.value >= units.size) {
+                if (_sleepAtChapterEnd.value) {
+                    stopForSleep("Bölüm bitti, okuma durdu.")
+                    return
+                }
                 if (!src.advance() || !coroutineContext.isActive) break
                 val (list, _) = src.paragraphs()
                 if (!coroutineContext.isActive) return

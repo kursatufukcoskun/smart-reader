@@ -28,6 +28,175 @@ enum Prompts {
         """
     }
 
+    static func highlightSynthesis(text: String, scope: String) -> String {
+        """
+        Aşağıda bir okurun kitaplardan seçtiği vurgular ve yazdığı notlar var (kapsam: \(scope)). Şunları yap:
+        1) Ortak temaları ve sık geçen fikirleri çıkar.
+        2) Kitaplar arasında ilginç bağlantılar ya da çelişkiler varsa belirt.
+        3) Notlarımdan yola çıkarak 3-5 maddelik bir sentez ve düşünmeye değer iki soru yaz.
+        Yalnızca verilen metne dayan; kitap adlarını anarak hangi fikrin nereden geldiğini göster.
+
+        <vurgular>
+        \(text)
+        </vurgular>
+        """
+    }
+
+    static func critique(passage: String, paragraph: String, bookTitle: String) -> String {
+        """
+        Kitap: \(bookTitle)
+        Aşağıdaki pasajı eleştirel okumak istiyorum. Kısa ve net yaz:
+        • Yazarın burada ileri sürdüğü ana iddia/argüman nedir?
+        • Dayandığı örtük varsayımlar neler?
+        • Olası zayıf noktalar, eksikler ya da karşı argümanlar neler? (bilinen karşıt görüşleri/literatürü anabilirsin, ama bunun kitaptan değil genel bilgiden geldiğini belirt)
+        • Bu argümanı sınamak için hangi soruyu sormalıyım?
+
+        Pasaj: "\(passage)"
+        Bağlam paragrafı: \(paragraph)
+        """
+    }
+
+    static func flashcard(quote: String, note: String, bookTitle: String) -> String {
+        """
+        Kitap: \(bookTitle)
+        Okur aşağıdaki pasajı vurguladı\(note.isEmpty ? "" : " ve şu notu yazdı: \"\(note)\""). Bu bilgiyi uzun vadede hatırlamak için TEK bir soru/cevap tekrar kartı yaz:
+        • Soru, pasajı görmeden yanıtlanabilir ve tek bir bilgiyi/kavramı sorsun (evet/hayır sorusu olmasın).
+        • Cevap kısa ve net olsun (1-3 cümle).
+        • Dil: \(lang).
+
+        Yalnızca şu biçimde yanıt ver:
+        SORU: ...
+        CEVAP: ...
+
+        Pasaj: "\(quote)"
+        """
+    }
+
+    /// "SORU: … CEVAP: …" çıktısını ayrıştırır.
+    static func parseFlashcard(_ out: String) -> (question: String, answer: String)? {
+        guard let q = out.range(of: "SORU:", options: .caseInsensitive),
+              let a = out.range(of: "CEVAP:", options: .caseInsensitive), q.upperBound <= a.lowerBound else { return nil }
+        let question = out[q.upperBound..<a.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        let answer = out[a.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return question.isEmpty || answer.isEmpty ? nil : (question, answer)
+    }
+
+    /// Zor kelimelerin üstüne yazılacak kısa karşılıkları ister (paragraf başına en çok `perParagraph`).
+    static func glossBatch(_ items: [(id: Int, text: String)], perParagraph: Int) -> String {
+        let body = items.map { "[\($0.id)] \($0.text)" }.joined(separator: "\n\n")
+        return """
+        Aşağıdaki numaralı paragraflarda, ana dili \(lang) olan bir dil öğrencisi için ZOR ya da ileri düzey kelime ve deyimleri seç (sık kullanılan, basit kelimeleri seçme). Paragraf başına EN ÇOK \(perParagraph) tane. Her seçim için paragraftaki BAĞLAMA uygun, kısa (1-3 kelime) \(lang) karşılık ver. Kelimeyi metinde geçtiği gibi AYNEN yaz.
+        Yalnızca JSON dizisi döndür, başka hiçbir şey yazma:
+        [{"id":1,"words":[["kelime","karşılık"],["deyim","karşılık"]]}]
+
+        \(body)
+        """
+    }
+
+    /// `glossBatch` çıktısından [(paragraf, [[kelime, karşılık]])] çıkarır.
+    static func parseGloss(_ out: String) -> [(id: Int, pairs: [[String]])] {
+        guard let a = out.firstIndex(of: "["), let b = out.lastIndex(of: "]"), a < b,
+              let data = String(out[a...b]).data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { o in
+            guard let id = (o["id"] as? Int) ?? Int("\(o["id"] ?? "")"), let words = o["words"] as? [[Any]] else { return nil }
+            let pairs = words.compactMap { w -> [String]? in
+                guard w.count >= 2, let k = w[0] as? String, let g = w[1] as? String, !k.isEmpty, !g.isEmpty else { return nil }
+                return [k, g]
+            }
+            return (id, pairs)
+        }
+    }
+
+    static func wrapUp(title: String, author: String, highlights: String) -> String {
+        """
+        Bir okur "\(title)"\(author.isEmpty ? "" : " (\(author))") kitabını bitirdi. Aşağıda kitaptan yaptığı vurgular ve notlar var. Bunlardan yola çıkarak kişisel bir kapanış özeti yaz:
+        1) Bu okura göre kitaptan kalan 4-6 ana fikir (maddeler).
+        2) Vurguların ağırlık verdiği temalar.
+        3) Hatırlanmaya değer 2-3 alıntı (olduğu gibi, tırnak içinde).
+        4) Okura bir kapanış düşüncesi ya da üzerinde düşünmesi için bir soru.
+        Yalnızca verilen vurgulara dayan.
+
+        <vurgular>
+        \(highlights)
+        </vurgular>
+        """
+    }
+
+    /// İlişki haritası için düğüm/kenar listesi ister (çizimi uygulama yapar).
+    static func relationMap(context: String, bookTitle: String) -> String {
+        """
+        Aşağıda "\(bookTitle)" kitabının, okurun şu ana kadar okuduğu kısmı var.
+        <kitap>
+        \(context)
+        </kitap>
+
+        Yukarıdaki metne dayanarak bir ilişki haritası için düğüm ve kenar listesi çıkar. Kurguysa karakterler ve önemli yerler/gruplar, kurgu dışıysa ana kişiler ve kavramlar.
+        Kurallar:
+        • En çok 18 düğüm (en önemlileri) ve en çok 30 kenar. Yalnızca metinde geçenleri ekle; metinde olmayan hiçbir şeyi ve sonrasını ima etme.
+        • "label" en çok 3 kelime; her düğüm bir kez.
+        • "group": person (kişi/karakter), place (yer), concept (kavram), org (grup/kurum) değerlerinden biri.
+        • "note": o düğümü \(lang) dilinde tek cümleyle anlat.
+        • Kenar "label"ı 1-3 kelimelik \(lang) ilişki (ör. kardeşi, düşmanı, çalıştığı yer).
+        Yalnızca şu biçimde JSON döndür, başka hiçbir şey yazma:
+        {"nodes":[{"id":"n1","label":"...","group":"person","note":"..."}],"edges":[{"from":"n1","to":"n2","label":"..."}]}
+        """
+    }
+
+    /// Bugün tekrar edilecek kelimelerin hepsini içeren mini hikâye/deneme + çevirisi.
+    static func vocabStory(_ words: [(word: String, gloss: String)]) -> String {
+        let list = words.map { "- \($0.word) — \($0.gloss)" }.joined(separator: "\n")
+        return """
+        Aşağıda bir dil öğrencisinin bugün tekrar edeceği kelimeler var (kelime — kısa karşılık). Kelimeler genelde aynı yabancı dilde.
+        Bu kelimelerin HEPSİNİ kullanan, o yabancı dilde yazılmış, 2 paragraflık akıcı ve sürükleyici bir mini hikâye ya da deneme yaz.
+        • Her kelimeyi metinde **kalın** işaretle (gerekirse çekimli hâliyle ama tanınır biçimde); kelimeler zorlama durmasın.
+        • Kelimeler farklı dillerdense her dil için ayrı kısa bir paragraf yaz.
+        • Sonra tek başına bir "---" satırı ekle ve metnin \(lang) çevirisini yaz (çeviride kalın kullanma).
+        • Başlık ekleme.
+
+        Kelimeler:
+        \(list)
+        """
+    }
+
+    /// Uzun aradan sonra kitaba dönen okur için: kaldığı yerden hemen önceyi kısaca hatırlatır.
+    static let resume = "Kitaba uzun bir aradan sonra döndüm. Kaldığım yerden hemen öncesini (okuduğum son sayfa ya da bölümün sonunu) 3 cümleyle hatırlat: kimler vardı, ne oluyordu, nerede kalmıştı. Spoiler yok."
+
+    /// Bir bölümden okurun hatırlaması gereken 3-5 içgörü ister (satır başına bir içgörü).
+    static func insights(text: String, bookTitle: String, scope: String) -> String {
+        """
+        Kitap: \(bookTitle) — \(scope)
+        Aşağıdaki bölümden okurun hatırlaması gereken 3-5 İÇGÖRÜ çıkar. İçgörü; bölümde geçen bir fikir, argüman, olay ya da ilişkinin "ne anlama geldiğini" 1-2 cümleyle söyleyen, kendi başına anlaşılır bir not olmalı (özet cümlesi ya da alıntı değil). Yalnızca bu metne dayan, sonrasını ima etme. Dil: \(lang).
+        Her satıra bir içgörü yaz, satırı "- " ile başlat; başka hiçbir şey yazma.
+
+        Metin:
+        \(text)
+        """
+    }
+
+    /// `insights` çıktısını madde madde ayırır.
+    static func parseInsights(_ out: String) -> [String] {
+        var marked: [String] = [], other: [String] = []
+        for line in out.split(whereSeparator: \.isNewline) {
+            var t = line.trimmingCharacters(in: .whitespaces)
+            var isMarked = false
+            // Yalnızca "- ", "• ", "* ", "1. " gibi madde işaretleri (boşluk ardından) soyulur; **kalın** metne dokunulmaz.
+            if let r = t.range(of: #"^([-•–*]|\d+[.)])\s+"#, options: .regularExpression) { t.removeSubrange(r); isMarked = true }
+            t = t.trimmingCharacters(in: .whitespaces)
+            guard t.count >= 15 else { continue }
+            if isMarked { marked.append(t) } else { other.append(t) }
+        }
+        // Model bir giriş cümlesi yazdıysa (madde işaretsiz) yalnızca maddeleri al
+        return marked.isEmpty ? other : marked
+    }
+
+    // Okuyucudan tek dokunuşla sohbete gönderilen hazır sorular (sohbet zaten yalnızca okunan kısmı bilir).
+    static let recap = "Kaldığım yere kadar olanları kısaca hatırlat: ana olay/argüman akışı, son bölümde ne oldu ve şu an geldiğimiz nokta. 6-8 madde, spoiler yok."
+    static let cast = "Şu ana kadar okuduğum kısımdaki önemli karakterleri (kurgu dışıysa kavramları ve terimleri) listele. Her biri için bir cümleyle kim/ne olduğunu ve şimdiye kadar öğrendiklerimi yaz."
+    static func xray(_ term: String) -> String {
+        "\"\(term)\" kimdir/nedir? Okuduğum kısma göre: ilk nerede geçti ve şimdiye kadar onun hakkında ne biliyoruz? Kısa tut, spoiler verme."
+    }
+
     static func chatSystem(bookTitle: String) -> String {
         """
         You are the reading companion of a reader of \(bookTitle). The reader's language is \(lang); answer in \(lang). The part of the book the reader has read so far is given in the first message between <kitap> tags.

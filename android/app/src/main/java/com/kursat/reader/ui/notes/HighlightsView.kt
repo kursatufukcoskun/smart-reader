@@ -19,13 +19,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -55,20 +59,31 @@ import com.kursat.reader.ui.reader.HighlightEditorSheet
 @Composable
 fun HighlightsView(
     store: HighlightStore,
+    library: com.kursat.reader.model.LibraryStore,
+    settings: com.kursat.reader.model.ReaderSettings,
+    vocab: com.kursat.reader.model.VocabStore,
     onJumpToBook: (String) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
     val items by store.items.collectAsState()
+    val books by library.books.collectAsState()
     var search by remember { mutableStateOf("") }
+    var tag by remember { mutableStateOf<String?>(null) }
+    var tagMenu by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Highlight?>(null) }
+    val ai = remember { com.kursat.reader.ai.AIAssistant() }
 
-    val filtered = remember(items, search) {
+    val filtered = remember(items, search, tag, books) {
+        val tagged: Set<String>? = tag?.let { t ->
+            books.filter { it.tags?.contains(t) == true }.map { it.id.uppercase() }.toSet()
+        }
         items.filter { h ->
-            search.isBlank() ||
-                h.text.contains(search, ignoreCase = true) ||
-                h.note.contains(search, ignoreCase = true) ||
-                h.bookTitle.contains(search, ignoreCase = true)
+            (tagged == null || h.bookID.uppercase() in tagged) &&
+                (search.isBlank() ||
+                    h.text.contains(search, ignoreCase = true) ||
+                    h.note.contains(search, ignoreCase = true) ||
+                    h.bookTitle.contains(search, ignoreCase = true))
         }
     }
 
@@ -82,6 +97,33 @@ fun HighlightsView(
             .sortedBy { it.first }
     }
 
+    /** Süzülen vurgu ve notlardan ortak temalar, bağlantılar ve bir sentez çıkarır. */
+    fun synthesize() {
+        val sb = StringBuilder()
+        for ((title, list) in groups) {
+            sb.append("\n## ").append(title).append('\n')
+            for (h in list) {
+                if (h.isInsight) continue
+                sb.append("- \"").append(h.text.replace('\n', ' ')).append('"')
+                if (h.note.isNotEmpty()) sb.append(" — not: ").append(h.note)
+                sb.append('\n')
+            }
+        }
+        val text = sb.toString().take(60_000)
+        val scope = tag?.let { "#$it" } ?: if (search.isBlank()) "tüm kitaplar" else "“$search”"
+        val cfg = settings.current.config(com.kursat.reader.model.LLMTier.smart)
+        ai.start(
+            com.kursat.reader.ai.AIRequest(
+                title = "Vurgu sentezi: $scope",
+                system = com.kursat.reader.ai.Prompts.summarySystem,
+                user = com.kursat.reader.ai.Prompts.highlightSynthesis(text, scope),
+                config = cfg,
+                maxTokens = 3072,
+                cacheKey = com.kursat.reader.ai.ResponseCache.key("hlsyn", cfg.cacheID, text)
+            )
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -92,6 +134,20 @@ fun HighlightsView(
                     }
                 },
                 actions = {
+                    if (library.allTags.isNotEmpty()) {
+                        Box {
+                            TextButton(onClick = { tagMenu = true }) { Text(if (tag == null) "Etiket" else "#$tag") }
+                            DropdownMenu(expanded = tagMenu, onDismissRequest = { tagMenu = false }) {
+                                DropdownMenuItem(text = { Text("Tüm kitaplar") }, onClick = { tag = null; tagMenu = false })
+                                library.allTags.forEach { t ->
+                                    DropdownMenuItem(text = { Text("#$t") }, onClick = { tag = t; tagMenu = false })
+                                }
+                            }
+                        }
+                    }
+                    IconButton(onClick = { synthesize() }, enabled = filtered.isNotEmpty()) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = "Yapay zekâ ile sentezle")
+                    }
                     IconButton(
                         onClick = {
                             val md = store.exportMarkdown()
@@ -174,13 +230,20 @@ fun HighlightsView(
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 verticalAlignment = Alignment.Top
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .width(4.dp)
-                                        .height(52.dp)
-                                        .background(h.color.color, RoundedCornerShape(2.dp))
-                                )
+                                if (h.isInsight) {
+                                    Text("✨", modifier = Modifier.width(20.dp))
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(4.dp)
+                                            .height(52.dp)
+                                            .background(h.color.color, RoundedCornerShape(2.dp))
+                                    )
+                                }
                                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (h.isInsight) {
+                                        Text("Yapay zekâ içgörüsü", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                                    }
                                     Text(
                                         text = h.text,
                                         fontFamily = FontFamily.Serif,
@@ -218,6 +281,8 @@ fun HighlightsView(
             }
         }
     }
+
+    com.kursat.reader.ui.shared.AIPanelSheet(ai = ai, vocab = vocab)
 
     editing?.let { h ->
         HighlightEditorSheet(

@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
         val app = application as ReaderApplication
         setContent {
             val dark = isSystemInDarkTheme()
+            androidx.compose.runtime.LaunchedEffect(dark) { app.settings.applySystem(dark) }
             MaterialTheme(
                 colorScheme = if (dark) darkColorScheme() else lightColorScheme()
             ) {
@@ -169,6 +170,20 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Intent.ACTION_SEND -> {
+                // Tarayıcıdan paylaşılan web adresi: makaleyi kitap olarak ekle
+                val shared = intent.getStringExtra(Intent.EXTRA_TEXT)
+                val link = shared?.let { com.kursat.reader.model.ArticleImporter.firstUrl(it) }
+                if (link != null && intent.type?.startsWith("text/") == true) {
+                    CoroutineScope(Dispatchers.Main).launch {
+                        try {
+                            val b = app.library.importArticle(link)
+                            pendingOpenBookId = b.id
+                        } catch (e: Exception) {
+                            android.widget.Toast.makeText(this@MainActivity, e.message ?: "Makale eklenemedi", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    return
+                }
                 val stream: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
@@ -314,6 +329,9 @@ fun ReaderAppRoot(
         composable("highlights") {
             HighlightsView(
                 store = app.highlights,
+                library = app.library,
+                settings = app.settings,
+                vocab = app.vocab,
                 onJumpToBook = { bookID ->
                     app.library.touch(bookID)
                     navController.navigate("reader/$bookID")

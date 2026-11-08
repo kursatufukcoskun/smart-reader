@@ -42,11 +42,31 @@ struct LibraryView: View {
     @State private var search = ""
     @State private var bookToDelete: Book?
     @State private var tagBook: Book?
+    @State private var editBook: Book?
+    @State private var wrapBook: Book?
+    @State private var showArticleAlert = false
+    @State private var articleURL = ""
     @State private var info: String?
     @State private var findingCover: UUID?
     #if DEBUG
     @State private var demoStudy: ChapterStudyModel?
     #endif
+
+    private func addArticle() {
+        let address = articleURL
+        isImporting = true
+        Task {
+            do {
+                let file = try await ArticleImporter.fetch(from: address)
+                try await library.importBook(from: file)
+                try? FileManager.default.removeItem(at: file)
+            } catch {
+                importError = error.localizedDescription
+            }
+            isImporting = false
+            sync.syncSoon()
+        }
+    }
 
     private var visibleBooks: [Book] {
         library.sortedBooks.filter { b in
@@ -62,6 +82,10 @@ struct LibraryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     GoalBanner()
+                    DailyHighlightCard { h in
+                        highlights.pendingJump = h
+                        path.append(h.bookID)
+                    }
                     if !library.books.isEmpty { filterChips }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 170, maximum: 220), spacing: 28)], spacing: 32) {
                         ForEach(visibleBooks) { book in
@@ -70,6 +94,8 @@ struct LibraryView: View {
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
+                                Button { wrapBook = book } label: { Label("Kitap karnesi", systemImage: "chart.bar.doc.horizontal") }
+                                Button { editBook = book } label: { Label("Bilgileri düzenle", systemImage: "pencil") }
                                 Button { tagBook = book } label: { Label("Etiketler", systemImage: "tag") }
                                 Button {
                                     Task {
@@ -129,6 +155,14 @@ struct LibraryView: View {
                     SyncButton()
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Sırala", selection: $library.sort) {
+                            ForEach(LibraryStore.Sort.allCases) { Text($0.title).tag($0) }
+                        }
+                    } label: { Image(systemName: "arrow.up.arrow.down") }
+                    .accessibilityLabel("Sırala")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink(value: LibraryRoute.stats) { Image(systemName: "chart.bar.xaxis") }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -141,7 +175,14 @@ struct LibraryView: View {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showImporter = true } label: { Image(systemName: "plus") }
+                    Menu {
+                        Button { showImporter = true } label: { Label("Dosyadan ekle (EPUB, PDF)", systemImage: "doc.badge.plus") }
+                        Button {
+                            // Panoda bir web adresi varsa hazır gelsin
+                            if let s = UIPasteboard.general.string, s.hasPrefix("http") { articleURL = s } else { articleURL = "" }
+                            showArticleAlert = true
+                        } label: { Label("Web adresinden ekle…", systemImage: "globe") }
+                    } label: { Image(systemName: "plus") }
                 }
             }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.epub, .pdf], allowsMultipleSelection: true) { result in
@@ -170,7 +211,19 @@ struct LibraryView: View {
             .sheet(item: $demoStudy) { StudyView(model: $0) }
             #endif
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .alert("Web adresinden ekle", isPresented: $showArticleAlert) {
+                TextField("https://…", text: $articleURL)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                Button("Ekle") { addArticle() }
+                Button("Vazgeç", role: .cancel) {}
+            } message: {
+                Text("PDF ya da EPUB bağlantısıysa dosya olduğu gibi eklenir; web sayfasıysa makale metni ayıklanıp tek bölümlük bir kitap olarak eklenir.")
+            }
             .sheet(item: $tagBook) { b in TagEditor(bookID: b.id).presentationDetents([.medium, .large]) }
+            .sheet(item: $editBook) { b in BookInfoEditor(book: b).presentationDetents([.medium]) }
+            .sheet(item: $wrapBook) { b in BookWrapUpView(book: b).presentationDetents([.large]) }
             .confirmationDialog(
                 bookToDelete.map { "“\($0.title)” silinsin mi?" } ?? "",
                 isPresented: Binding(get: { bookToDelete != nil }, set: { if !$0 { bookToDelete = nil } }),
@@ -422,6 +475,43 @@ struct BookCard: View {
             ZStack {
                 LinearGradient(colors: [.indigo, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)
                 Text(book.title).font(.headline).foregroundStyle(.white).multilineTextAlignment(.center).padding(12)
+            }
+        }
+    }
+}
+
+
+/// Kitap başlığı ve yazarını düzenler (gömülü bilgi bozuksa); diğer cihazlara senkronlanır.
+struct BookInfoEditor: View {
+    let book: Book
+    @EnvironmentObject var library: LibraryStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var author: String
+
+    init(book: Book) {
+        self.book = book
+        _title = State(initialValue: book.title)
+        _author = State(initialValue: book.author)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Başlık") { TextField("Başlık", text: $title) }
+                Section("Yazar") { TextField("Yazar", text: $author) }
+            }
+            .navigationTitle("Bilgileri düzenle")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Vazgeç") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Kaydet") {
+                        library.updateInfo(book.id, title: title, author: author)
+                        dismiss()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
     }

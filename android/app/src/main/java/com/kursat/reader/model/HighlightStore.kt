@@ -24,6 +24,10 @@ data class Highlight(
     val text: String,
     val note: String = "",
     val color: HighlightColor = HighlightColor.yellow,
+    /** Boşsa klasik dolgulu vurgu (iOS ile aynı alan; eski kayıtlar etkilenmez) */
+    val style: HighlightStyle? = null,
+    /** null = kullanıcının kendi vurgusu; "insight" = yapay zekâ içgörüsü (metinde işaretlenmez, yalnızca listede durur). */
+    val kind: String? = null,
     val createdAt: String = IsoDate.now(),
     val chapter: Int? = null,
     val start: Int? = null,
@@ -33,6 +37,8 @@ data class Highlight(
     val location: String = "",
     val updatedAt: String? = null
 ) {
+    val effectiveStyle: HighlightStyle get() = style ?: HighlightStyle.highlight
+    val isInsight: Boolean get() = kind == "insight"
     val stamp: Instant get() = IsoDate.parseOrNull(updatedAt) ?: IsoDate.parse(createdAt)
 
     val sortKey: Pair<Int, Int>
@@ -69,6 +75,22 @@ class HighlightStore {
 
     init {
         load()
+    }
+
+    /** Kullanıcının kendi vurguları (yapay zekâ içgörüleri hariç). */
+    val userItems: List<Highlight> get() = _items.value.filter { !it.isInsight }
+
+    /** İçgörüleri bölüme/sayfaya ekler; aynı kitapta aynı metin varsa atlar. Eklenen sayıyı döner. */
+    fun addInsights(texts: List<String>, bookID: String, bookTitle: String, chapter: Int?, page: Int?, location: String): Int {
+        var n = 0
+        for (raw in texts) {
+            val t = raw.replace("**", "").trim()
+            if (t.isEmpty()) continue
+            if (_items.value.any { it.isInsight && it.bookID.equals(bookID, ignoreCase = true) && it.text.equals(t, ignoreCase = true) }) continue
+            add(Highlight(bookID = bookID, bookTitle = bookTitle, text = t, kind = "insight", chapter = chapter, page = page, location = location))
+            n++
+        }
+        return n
     }
 
     fun forBook(bookID: String): List<Highlight> =
@@ -119,7 +141,8 @@ class HighlightStore {
         for (list in sortedGroups) {
             out.append("\n## ${list.firstOrNull()?.bookTitle.orEmpty()}\n")
             for (h in list.sortedWith(compareBy({ it.sortKey.first }, { it.sortKey.second }))) {
-                out.append("\n> ${h.text.replace("\n", " ")}\n")
+                val quote = h.text.replace("\n", " ")
+                out.append(if (h.isInsight) "\n> ✨ *Yapay zekâ içgörüsü:* $quote\n" else "\n> $quote\n")
                 if (h.location.isNotEmpty()) out.append("\n*${h.location}*\n")
                 if (h.note.isNotEmpty()) out.append("\n**Not:** ${h.note}\n")
             }

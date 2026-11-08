@@ -53,6 +53,10 @@ final class ChatModel: ObservableObject {
     @Published var error: String?
     @Published var info: BookContext = .empty
     @Published var tier: Tier = .smart
+    /// Bir yanıtı okuma konumuna not olarak kaydeder (okuyucu bağlar).
+    var saveNote: ((String) -> Void)?
+    /// Okuyucudan gelen hazır soru: sohbet açılıp bağlam hazır olunca otomatik gönderilir.
+    var pendingPrompt: String?
 
     let settings: ReaderSettings
     let bookTitle: String
@@ -159,6 +163,50 @@ enum HTMLText {
             if t.isEmpty { if lines.last != "" { lines.append("") } } else { lines.append(t) }
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// HTML içinde `id`'si verilen öğenin (boş bir <a>/<span> ise onu içeren paragrafın) düz metni.
+    static func elementText(id: String, in html: String) -> String? {
+        let ns = html as NSString
+        let esc = NSRegularExpression.escapedPattern(for: id)
+        let pattern = #"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\b(?:id|name)\s*=\s*[\"']"# + esc + #"[\"'][^>]*>"#
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: html, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        let tag = ns.substring(with: m.range(at: 1)).lowercased()
+        var text = ""
+        if tag != "a" && tag != "span", let inner = balanced(tag: tag, after: m.range, in: ns) { text = plain(from: inner) }
+        if text.isEmpty {
+            let before = ns.substring(to: m.range.location) as NSString
+            if let br = try? NSRegularExpression(pattern: #"<(p|li|div|aside|dd|blockquote)\b[^>]*>"#, options: [.caseInsensitive]),
+               let last = br.matches(in: before as String, range: NSRange(location: 0, length: before.length)).last {
+                let t = before.substring(with: last.range(at: 1)).lowercased()
+                if let inner = balanced(tag: t, after: last.range, in: ns) { text = plain(from: inner) }
+            }
+        }
+        // geri bağlantı oklarını ve fazla boşluğu temizle
+        let junk = CharacterSet(charactersIn: "↩︎↩⤴↑⏎").union(.whitespacesAndNewlines)
+        text = text.trimmingCharacters(in: junk)
+        text = text.split(whereSeparator: \.isNewline).joined(separator: "\n")
+        return text.isEmpty ? nil : String(text.prefix(6000))
+    }
+
+    private static func balanced(tag: String, after open: NSRange, in ns: NSString) -> String? {
+        guard let re = try? NSRegularExpression(pattern: "<(/?)" + tag + #"\b[^>]*>"#, options: [.caseInsensitive]) else { return nil }
+        let start = open.location + open.length
+        guard start <= ns.length else { return nil }
+        var depth = 1
+        var result: String?
+        re.enumerateMatches(in: ns as String, range: NSRange(location: start, length: ns.length - start)) { m, _, stop in
+            guard let m else { return }
+            let closing = m.range(at: 1).length > 0
+            if !closing && ns.substring(with: m.range).hasSuffix("/>") { return }
+            depth += closing ? -1 : 1
+            if depth == 0 {
+                result = ns.substring(with: NSRange(location: start, length: m.range.location - start))
+                stop.pointee = true
+            }
+        }
+        return result
     }
 
     private static func replace(_ s: String, _ pattern: String, _ with: String) -> String {

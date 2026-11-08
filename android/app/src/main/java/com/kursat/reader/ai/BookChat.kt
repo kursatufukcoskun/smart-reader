@@ -58,6 +58,12 @@ class ChatModel(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** Bir yanıtı okuma konumuna not olarak kaydeder (okuyucu bağlar). */
+    var saveNote: ((String) -> Unit)? = null
+
+    /** Okuyucudan gelen hazır soru: sohbet açılıp bağlam hazır olunca otomatik gönderilir. */
+    var pendingPrompt: String? = null
+
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
 

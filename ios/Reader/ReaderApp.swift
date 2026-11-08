@@ -27,6 +27,10 @@ struct ReaderApp: App {
                 .environmentObject(bookmarks)
                 .environmentObject(tracker)
                 .environmentObject(sync)
+                .onAppear { settings.applySystem(dark: SystemAppearance.isDark) }
+                .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in
+                    settings.applySystem(dark: SystemAppearance.isDark)
+                }
                 .onAppear {
                     #if targetEnvironment(macCatalyst)
                     UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.forEach {
@@ -42,6 +46,7 @@ struct ReaderApp: App {
                         library.save(); highlights.save(); vocab.save(); bookmarks.save(); tracker.save()
                         #endif
                     case .active:
+                        settings.applySystem(dark: SystemAppearance.isDark)
                         sync.syncSoon()
                     case .background:
                         library.save(); highlights.save(); vocab.save(); bookmarks.save(); tracker.save()

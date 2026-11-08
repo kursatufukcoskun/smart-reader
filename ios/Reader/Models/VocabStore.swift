@@ -34,6 +34,9 @@ struct VocabEntry: Identifiable, Codable, Hashable {
     var dueAt = Date()
     var reviews = 0
     var updatedAt: Date?
+    /// nil = kelime kartı; "card" = vurgudan üretilen soru/cevap kartı (word = soru, explanation = cevap).
+    var kind: String?
+    var isCard: Bool { kind == "card" }
     var stamp: Date { updatedAt ?? addedAt }
 
     var isDue: Bool { dueAt <= Date() }
@@ -79,6 +82,22 @@ final class VocabStore: ObservableObject {
         let first = explanation.split(separator: "\n").first.map(String.init) ?? explanation
         let cleaned = first.replacingOccurrences(of: "*", with: "").trimmingCharacters(in: .whitespaces)
         return String(cleaned.prefix(160))
+    }
+
+    /// Vurgudan üretilen soru/cevap kartı: kelime defteriyle aynı Leitner kutularında tekrar edilir.
+    /// Aynı kitapta aynı soru zaten kartsa eklemez (false döner).
+    @discardableResult
+    func addCard(question: String, answer: String, quote: String, bookID: UUID, bookTitle: String) -> Bool {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if entries.contains(where: { $0.isCard && $0.bookID == bookID && $0.word.caseInsensitiveCompare(q) == .orderedSame }) { return false }
+        let back = answer + (quote.isEmpty ? "" : "\n\n> " + quote.replacingOccurrences(of: "\n", with: " "))
+        var e = VocabEntry(word: question, gloss: Self.gloss(from: answer), explanation: back,
+                           paragraph: "", bookID: bookID, bookTitle: bookTitle)
+        e.kind = "card"
+        e.updatedAt = Date()
+        entries.insert(e, at: 0)
+        scheduleSave()
+        return true
     }
 
     func add(_ d: VocabDraft, explanation: String) {

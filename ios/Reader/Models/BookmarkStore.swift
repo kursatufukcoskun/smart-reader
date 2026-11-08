@@ -13,6 +13,8 @@ struct Bookmark: Identifiable, Codable, Hashable {
     var location: String
     var createdAt = Date()
     var updatedAt: Date?
+    /// Sohbet yanıtından kaydedilen not (yer imi düğmesiyle açılıp kapanan klasik yer imi değildir).
+    var isNote: Bool?
     var stamp: Date { updatedAt ?? createdAt }
 
     var sortKey: (Int, Double) {

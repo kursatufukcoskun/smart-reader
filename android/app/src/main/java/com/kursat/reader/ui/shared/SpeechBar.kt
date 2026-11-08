@@ -24,6 +24,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,6 +48,16 @@ fun SpeechBar(speech: SpeechController, settings: ReaderSettings, modifier: Modi
     val caption by speech.caption.collectAsState()
     val s by settings.state.collectAsState()
     var menu by remember { mutableStateOf(false) }
+    var sleepMenu by remember { mutableStateOf(false) }
+    val sleepEnd by speech.sleepEnd.collectAsState()
+    val sleepAtEnd by speech.sleepAtChapterEnd.collectAsState()
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(sleepEnd) {
+        while (sleepEnd != null) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(15_000)
+        }
+    }
 
     Surface(
         shape = RoundedCornerShape(28.dp),
@@ -107,6 +119,32 @@ fun SpeechBar(speech: SpeechController, settings: ReaderSettings, modifier: Modi
                                     speech.settingsChanged()
                                     menu = false
                                 }
+                            )
+                        }
+                    }
+                }
+                androidx.compose.foundation.layout.Box {
+                    val active = sleepEnd != null || sleepAtEnd
+                    val label = when {
+                        sleepEnd != null -> "🌙 ${maxOf(1L, (sleepEnd!! - now + 59_999) / 60_000)} dk"
+                        sleepAtEnd -> "🌙 bölüm"
+                        else -> "🌙"
+                    }
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.clickable { sleepMenu = true }.padding(horizontal = 8.dp, vertical = 8.dp)
+                    )
+                    DropdownMenu(expanded = sleepMenu, onDismissRequest = { sleepMenu = false }) {
+                        listOf(15, 30, 45, 60).forEach { m ->
+                            DropdownMenuItem(text = { Text("$m dakika") }, onClick = { speech.setSleep(m); sleepMenu = false })
+                        }
+                        DropdownMenuItem(text = { Text("Bölüm sonunda durdur") }, onClick = { speech.setSleepAtChapterEnd(); sleepMenu = false })
+                        if (active) {
+                            DropdownMenuItem(
+                                text = { Text("Zamanlayıcıyı kapat", color = MaterialTheme.colorScheme.error) },
+                                onClick = { speech.clearSleep(); sleepMenu = false }
                             )
                         }
                     }

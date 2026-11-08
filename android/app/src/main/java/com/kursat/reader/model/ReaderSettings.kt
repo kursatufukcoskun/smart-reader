@@ -98,9 +98,59 @@ enum class ReadingMode {
 @Serializable
 enum class TranslationLayout {
     @SerialName("below") below,
-    @SerialName("side") side;
+    @SerialName("side") side,
+    @SerialName("replace") replace;
 
-    val title: String get() = if (this == below) "Altında" else "Yan yana"
+    val title: String
+        get() = when (this) {
+            below -> "Altında"
+            side -> "Yan yana"
+            replace -> "Yerine"
+        }
+}
+
+/** Kelime ipuçlarının yoğunluğu (paragraf başına kaç zor kelime işaretlenir). */
+@Serializable
+enum class GlossLevel(val perParagraph: Int) {
+    @SerialName("few") few(2),
+    @SerialName("normal") normal(4),
+    @SerialName("many") many(8);
+
+    val title: String
+        get() = when (this) {
+            few -> "Az"
+            normal -> "Orta"
+            many -> "Çok"
+        }
+}
+
+/** Metin hizalaması: kitabın kendi stilini koru ya da zorla. */
+@Serializable
+enum class TextAlignMode {
+    @SerialName("book") book,
+    @SerialName("left") left,
+    @SerialName("justify") justify;
+
+    val title: String
+        get() = when (this) {
+            book -> "Kitaba göre"
+            left -> "Sola"
+            justify -> "İki yana"
+        }
+}
+
+@Serializable
+enum class HyphenMode {
+    @SerialName("book") book,
+    @SerialName("on") on,
+    @SerialName("off") off;
+
+    val title: String
+        get() = when (this) {
+            book -> "Kitaba göre"
+            on -> "Açık"
+            off -> "Kapalı"
+        }
 }
 
 @Serializable
@@ -151,6 +201,21 @@ enum class ReaderFont(val rawValue: String) {
             else -> literata
         }
     }
+}
+
+/** Vurgunun görünümü: dolgu, altı çizili veya dalgalı çizgi (kalemle çizilenler için). */
+@Serializable
+enum class HighlightStyle {
+    @SerialName("highlight") highlight,
+    @SerialName("underline") underline,
+    @SerialName("wavy") wavy;
+
+    val title: String
+        get() = when (this) {
+            highlight -> "Vurgu"
+            underline -> "Altı çizili"
+            wavy -> "Dalgalı"
+        }
 }
 
 @Serializable
@@ -205,6 +270,22 @@ data class LLMConfig(
 
 data class ReaderSettingsState(
     val theme: ReaderTheme = ReaderTheme.sepia,
+    /** Tema sistem görünümünü (açık/koyu) izler: gündüz teması ve gece teması ayrı tutulur. */
+    val followSystem: Boolean = false,
+    val dayTheme: ReaderTheme = ReaderTheme.light,
+    val nightTheme: ReaderTheme = ReaderTheme.dark,
+    /** Biyonik okuma: kelimelerin ilk harfleri kalın (yalnızca EPUB). */
+    /** PDF'te sayfa kenarlarındaki boş beyaz boşluğu kırp (metin daha büyük görünür). */
+    /** Yıllık kitap hedefi (0 = kapalı); cihaza özel. */
+    val yearlyGoal: Int = 12,
+    val cropMargins: Boolean = false,
+    val bionic: Boolean = false,
+    /** Satır odaklayıcı: ekranda yalnızca okunan şerit parlak kalır (yalnızca EPUB). */
+    val readingRuler: Boolean = false,
+    val rulerFraction: Double = 0.42,
+    val glossLevel: GlossLevel = GlossLevel.normal,
+    val textAlign: TextAlignMode = TextAlignMode.book,
+    val hyphenation: HyphenMode = HyphenMode.book,
     val font: ReaderFont = ReaderFont.literata,
     val fontScale: Double = 1.1,
     val lineHeight: Double = 1.55,
@@ -222,8 +303,12 @@ data class ReaderSettingsState(
     val vocabReminderEnabled: Boolean = false,
     val columns: ColumnMode = ColumnMode.single,
     val highlightColor: HighlightColor = HighlightColor.yellow,
+    /** Kalemle çizerken kullanılan stil (cihaza özel, senkronlanmaz) */
+    val penStyle: HighlightStyle = HighlightStyle.highlight,
     val readingMode: ReadingMode = ReadingMode.scroll,
     val edgeTap: Boolean = false,
+    /** Okuyucu açıkken ekran kendiliğinden kapanmasın (sesli okuma sırasında kapanabilir). Varsayılan: açık. */
+    val keepAwake: Boolean = true,
     val warmth: Double = 0.0,
     /** Çeviri, sözlük ve açıklamaların dili */
     val targetLanguage: TargetLanguage = TargetLanguage.tr,
@@ -269,6 +354,10 @@ data class ReaderSettingsState(
                 ReaderFont.bookerly -> FontInstaller.bookerlyCSS + FontInstaller.literataCSS
                 else -> ""
             }
+            val alignCss = if (textAlign == TextAlignMode.book) "" else
+                "body p, body li, body blockquote, body dd, body td { text-align: ${if (textAlign == TextAlignMode.left) "left" else "justify"} !important; }"
+            val hyphCss = if (hyphenation == HyphenMode.book) "" else
+                "body { -webkit-hyphens: ${if (hyphenation == HyphenMode.on) "auto" else "none"} !important; hyphens: ${if (hyphenation == HyphenMode.on) "auto" else "none"} !important; }"
             val speakBg = if (t.isDark) "rgba(125,183,255,0.20)" else "rgba(255,196,0,0.24)"
             val px = (18.0 * fontScale).roundToInt()
             return """
@@ -282,6 +371,8 @@ data class ReaderSettingsState(
                          font-family: inherit !important; line-height: inherit !important; }
                 body a, body a * { color: ${t.linkHex} !important; }
                 p { margin: 0 0 0.9em; }
+                $alignCss
+                $hyphCss
                 img, svg, video { max-width: 100% !important; height: auto !important; }
                 $imgFilter
                 ::selection { background: rgba(255, 190, 60, 0.45); }
@@ -292,6 +383,13 @@ data class ReaderSettingsState(
                 .llm-row > :first-child { margin: 0 !important; }
                 body .llm-row > .llm-tr { margin: 0; }
                 .llm-hide .llm-row { display: block; }
+                .llm-rep:not(.llm-showorig) { display: none !important; }
+                .llm-hide .llm-rep { display: revert !important; }
+                body .llm-tr.llm-r { margin: 0 0 0.9em; }
+                .llm-ic { display: inline-block; width: 18px; height: 18px; padding: 5px; margin: -5px 4px -5px -5px; vertical-align: middle; opacity: 0.75; }
+                .llm-ic svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+                body .llm-tr.llm-collapsed { border-left: 0; padding-left: 0; margin: -0.3em 0 0.6em; text-align: right; }
+                .llm-collapsed .llm-tx { display: none; }
                 body .llm-speak { background-color: $speakBg !important; border-radius: 4px; box-shadow: 0 0 0 4px $speakBg; }
                 .llm-hl { border-radius: 2px; }
                 body .llm-hl[data-color="yellow"] { background-color: rgba(255,214,10,0.42) !important; }
@@ -299,7 +397,21 @@ data class ReaderSettingsState(
                 body .llm-hl[data-color="blue"] { background-color: rgba(10,132,255,0.32) !important; }
                 body .llm-hl[data-color="pink"] { background-color: rgba(255,55,95,0.32) !important; }
                 body .llm-hl[data-color="orange"] { background-color: rgba(255,149,0,0.40) !important; }
-                body .llm-hl[data-note="1"] { border-bottom: 2px solid $noteLine; }
+                b.llm-bio { font-weight: 700 !important; }
+                ruby.llm-ruby { ruby-position: over; }
+                ruby.llm-ruby rt { font-size: 0.5em !important; color: ${t.translationHex} !important; font-weight: 400 !important;
+                                   font-family: sans-serif !important; line-height: 1 !important; letter-spacing: 0 !important; }
+                .llm-gl-hide rt.llm-rt { display: none !important; }
+                body .llm-find { background-color: rgba(255,120,0,0.55) !important; border-radius: 3px; }
+                body .llm-hl[data-style="underline"], body .llm-hl[data-style="wavy"] { background-color: transparent !important; text-decoration-thickness: 2px; text-underline-offset: 3px; border-radius: 0; }
+                body .llm-hl[data-style="underline"] { text-decoration-line: underline; text-decoration-style: solid; }
+                body .llm-hl[data-style="wavy"] { text-decoration-line: underline; text-decoration-style: wavy; }
+                body .llm-hl[data-style][data-color="yellow"] { text-decoration-color: rgb(255,204,0); }
+                body .llm-hl[data-style][data-color="green"] { text-decoration-color: rgb(52,199,89); }
+                body .llm-hl[data-style][data-color="blue"] { text-decoration-color: rgb(10,132,255); }
+                body .llm-hl[data-style][data-color="pink"] { text-decoration-color: rgb(255,55,95); }
+                body .llm-hl[data-style][data-color="orange"] { text-decoration-color: rgb(255,149,0); }
+                body .llm-hl[data-note="1"]:not([data-style]) { border-bottom: 2px solid $noteLine; }
                 $einkCSS
             """.trimIndent()
         }
@@ -319,6 +431,17 @@ class ReaderSettings(context: Context) {
 
     private fun load(): ReaderSettingsState {
         val theme = ReaderTheme.entries.firstOrNull { it.name == prefs.getString("theme", null) } ?: ReaderTheme.sepia
+        val yearlyGoal = prefs.getInt("yearlyGoal", 12)
+        val cropMargins = prefs.getBoolean("cropMargins", false)
+        val bionic = prefs.getBoolean("bionic", false)
+        val readingRuler = prefs.getBoolean("readingRuler", false)
+        val rulerFraction = prefs.getFloat("rulerFraction", 0.42f).toDouble().let { if (it > 0.05 && it < 0.95) it else 0.42 }
+        val glossLevel = GlossLevel.entries.firstOrNull { it.name == prefs.getString("glossLevel", null) } ?: GlossLevel.normal
+        val followSystem = prefs.getBoolean("followSystem", false)
+        val dayTheme = ReaderTheme.entries.firstOrNull { it.name == prefs.getString("dayTheme", null) } ?: ReaderTheme.light
+        val nightTheme = ReaderTheme.entries.firstOrNull { it.name == prefs.getString("nightTheme", null) } ?: ReaderTheme.dark
+        val textAlign = TextAlignMode.entries.firstOrNull { it.name == prefs.getString("textAlign", null) } ?: TextAlignMode.book
+        val hyphenation = HyphenMode.entries.firstOrNull { it.name == prefs.getString("hyphenation", null) } ?: HyphenMode.book
         val font = ReaderFont.fromRaw(prefs.getString("font", null))
         val fs = prefs.getFloat("fontScale", 1.1f).toDouble().let { if (it <= 0.0) 1.1 else it }
         val lh = prefs.getFloat("lineHeight", 1.55f).toDouble().let { if (it <= 0.0) 1.55 else it }
@@ -331,6 +454,7 @@ class ReaderSettings(context: Context) {
         val warmth = prefs.getFloat("warmth", 0f).toDouble()
         val readingMode = ReadingMode.entries.firstOrNull { it.name == prefs.getString("readingMode", null) } ?: ReadingMode.scroll
         val edgeTap = prefs.getBoolean("edgeTap", false)
+        val keepAwake = prefs.getBoolean("keepAwake", true)
         val columns = ColumnMode.entries.firstOrNull { it.name == prefs.getString("columns", null) } ?: ColumnMode.single
         val translationLayout = TranslationLayout.entries.firstOrNull { it.name == prefs.getString("translationLayout", null) } ?: TranslationLayout.below
         val dailyGoalMinutes = if (prefs.contains("dailyGoalMinutes")) prefs.getInt("dailyGoalMinutes", 20) else 20
@@ -339,9 +463,21 @@ class ReaderSettings(context: Context) {
         val reminderMinute = prefs.getInt("reminderMinute", 0)
         val vocabReminderEnabled = prefs.getBoolean("vocabReminderEnabled", false)
         val highlightColor = HighlightColor.entries.firstOrNull { it.name == prefs.getString("highlightColor", null) } ?: HighlightColor.yellow
+        val penStyle = HighlightStyle.entries.firstOrNull { it.name == prefs.getString("penStyle", null) } ?: HighlightStyle.highlight
 
         return ReaderSettingsState(
             theme = theme,
+            yearlyGoal = yearlyGoal,
+            cropMargins = cropMargins,
+            bionic = bionic,
+            readingRuler = readingRuler,
+            rulerFraction = rulerFraction,
+            glossLevel = glossLevel,
+            followSystem = followSystem,
+            dayTheme = dayTheme,
+            nightTheme = nightTheme,
+            textAlign = textAlign,
+            hyphenation = hyphenation,
             font = font,
             fontScale = fs,
             lineHeight = lh,
@@ -359,8 +495,10 @@ class ReaderSettings(context: Context) {
             vocabReminderEnabled = vocabReminderEnabled,
             columns = columns,
             highlightColor = highlightColor,
+            penStyle = penStyle,
             readingMode = readingMode,
             edgeTap = edgeTap,
+            keepAwake = keepAwake,
             warmth = warmth,
             targetLanguage = TargetLanguage.fromCode(prefs.getString("targetLanguage", null)) ?: TargetLanguage.tr,
             ttsLanguageCode = prefs.getString("ttsLanguageCode", "") ?: "",
@@ -371,6 +509,34 @@ class ReaderSettings(context: Context) {
             ttsBudgetUSD = prefs.getFloat("ttsBudgetUSD", 10f).toDouble(),
             ttsShowInPage = prefs.getBoolean("ttsShowInPage", false)
         )
+    }
+
+    // MARK: - Sistemle eşleşen tema
+
+    var systemDark = false
+        private set
+
+    /** Sistem görünümü değişince (ya da ayar açılınca) uygun temayı uygular. */
+    fun applySystem(dark: Boolean) {
+        systemDark = dark
+        val s = _state.value
+        if (!s.followSystem) return
+        val t = if (dark) s.nightTheme else s.dayTheme
+        if (s.theme != t) update { it.copy(theme = t) }
+    }
+
+    /** Tema seçici: sistemle eşleşme açıkken seçim o anki görünümün (gündüz/gece) temasını belirler. */
+    fun chooseTheme(t: ReaderTheme) = update { s ->
+        val n = s.copy(theme = t)
+        if (!s.followSystem) n else if (systemDark) n.copy(nightTheme = t) else n.copy(dayTheme = t)
+    }
+
+    fun setFollowSystem(on: Boolean) {
+        update { s ->
+            val n = s.copy(followSystem = on)
+            if (!on) n else if (s.theme.isDark) n.copy(nightTheme = s.theme) else n.copy(dayTheme = s.theme)
+        }
+        if (on) applySystem(systemDark)
     }
 
     fun update(transform: (ReaderSettingsState) -> ReaderSettingsState) {
@@ -406,6 +572,17 @@ class ReaderSettings(context: Context) {
     private fun saveToPrefs(s: ReaderSettingsState) {
         prefs.edit()
             .putString("theme", s.theme.name)
+            .putInt("yearlyGoal", s.yearlyGoal)
+            .putBoolean("cropMargins", s.cropMargins)
+            .putBoolean("bionic", s.bionic)
+            .putBoolean("readingRuler", s.readingRuler)
+            .putFloat("rulerFraction", s.rulerFraction.toFloat())
+            .putString("glossLevel", s.glossLevel.name)
+            .putBoolean("followSystem", s.followSystem)
+            .putString("dayTheme", s.dayTheme.name)
+            .putString("nightTheme", s.nightTheme.name)
+            .putString("textAlign", s.textAlign.name)
+            .putString("hyphenation", s.hyphenation.name)
             .putString("font", s.font.rawValue)
             .putFloat("fontScale", s.fontScale.toFloat())
             .putFloat("lineHeight", s.lineHeight.toFloat())
@@ -423,8 +600,10 @@ class ReaderSettings(context: Context) {
             .putBoolean("vocabReminderEnabled", s.vocabReminderEnabled)
             .putString("columns", s.columns.name)
             .putString("highlightColor", s.highlightColor.name)
+            .putString("penStyle", s.penStyle.name)
             .putString("readingMode", s.readingMode.name)
             .putBoolean("edgeTap", s.edgeTap)
+            .putBoolean("keepAwake", s.keepAwake)
             .putFloat("warmth", s.warmth.toFloat())
             .putString("targetLanguage", s.targetLanguage.code)
             .putString("ttsLanguageCode", s.ttsLanguageCode)

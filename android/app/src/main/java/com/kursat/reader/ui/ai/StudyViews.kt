@@ -33,6 +33,15 @@ fun ChapterStudySheet(
     val language by model.language.collectAsState()
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
+    val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as com.kursat.reader.ReaderApplication
+    // (soru, cevap) çiftlerini tekrar defterine kart olarak ekler; eklenen sayıyı döner (zaten olanlar sayılmaz)
+    val addCards: (List<Pair<String, String>>) -> Int = { list ->
+        list.count { app.vocab.addCard(it.first, it.second, "", model.bookID, model.bookTitle) }
+    }
+    // Maddeleri yapay zekâ içgörüsü olarak vurgular listesine ekler (konum yoksa null)
+    val addInsights: ((List<String>) -> Int)? = model.insightTarget?.let { t ->
+        { texts: List<String> -> app.highlights.addInsights(texts, model.bookID, model.bookTitle, t.chapter, t.page, t.location) }
+    }
 
     LaunchedEffect(language) {
         model.load(force = false)
@@ -91,9 +100,9 @@ fun ChapterStudySheet(
 
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         when (tab) {
-                            0 -> StudyOverviewTab(currentData)
-                            1 -> StudyQuizTab(currentData.quiz)
-                            2 -> StudyQATab(currentData.qa)
+                            0 -> StudyOverviewTab(currentData, addCards, addInsights)
+                            1 -> StudyQuizTab(currentData.quiz, addCards)
+                            2 -> StudyQATab(currentData.qa, addCards)
                         }
                     }
                 }
@@ -137,8 +146,12 @@ fun ChapterStudySheet(
     }
 }
 
+private fun plainMd(s: String) = s.replace("**", "").trim()
+
 @Composable
-private fun StudyOverviewTab(data: StudyData) {
+private fun StudyOverviewTab(data: StudyData, addCards: (List<Pair<String, String>>) -> Int, addInsights: ((List<String>) -> Int)?) {
+    var info by remember { mutableStateOf<String?>(null) }
+    val added = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -150,6 +163,13 @@ private fun StudyOverviewTab(data: StudyData) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Default.Summarize, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 Text("Ana Noktalar", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                if (addInsights != null) {
+                    Spacer(Modifier.weight(1f))
+                    androidx.compose.material3.TextButton(onClick = {
+                        val n = addInsights(data.summary)
+                        info = if (n > 0) "$n içgörü vurgulara eklendi" else "Bunlar zaten vurgularında"
+                    }) { Text("✨ Vurgulara ekle") }
+                }
             }
             data.summary.forEach { item ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -164,7 +184,14 @@ private fun StudyOverviewTab(data: StudyData) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Icon(Icons.Default.Lightbulb, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text("Önemli Kavramlar", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.weight(1f))
+                    androidx.compose.material3.TextButton(onClick = {
+                        val n = addCards(data.concepts.map { "${plainMd(it.term)} nedir?" to plainMd(it.definition) })
+                        added.addAll(data.concepts.map { it.term })
+                        info = if (n > 0) "$n kart tekrar defterine eklendi" else "Bu kavramlar zaten defterde"
+                    }) { Text("Hepsini ekle") }
                 }
+                info?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 data.concepts.forEach { c ->
                     Surface(
                         shape = RoundedCornerShape(10.dp),
@@ -174,6 +201,21 @@ private fun StudyOverviewTab(data: StudyData) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(c.term, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                             Text(c.definition, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            val done = c.term in added
+                            androidx.compose.material3.TextButton(
+                                enabled = !done,
+                                onClick = {
+                                    val n = addCards(listOf("${plainMd(c.term)} nedir?" to plainMd(c.definition)))
+                                    added.add(c.term)
+                                    info = if (n > 0) "Kart tekrar defterine eklendi" else "Bu kart zaten defterde"
+                                }
+                            ) { Text(if (done) "✓ Defterde" else "+ Tekrar defterine ekle") }
+                            if (addInsights != null) {
+                                androidx.compose.material3.TextButton(onClick = {
+                                    val n = addInsights(listOf("${plainMd(c.term)}: ${plainMd(c.definition)}"))
+                                    info = if (n > 0) "İçgörü vurgulara eklendi" else "Bu zaten vurgularında"
+                                }) { Text("✨ Vurgulara ekle") }
+                            }
                         }
                     }
                 }
@@ -183,8 +225,9 @@ private fun StudyOverviewTab(data: StudyData) {
 }
 
 @Composable
-private fun StudyQuizTab(quiz: List<QuizQuestion>) {
+private fun StudyQuizTab(quiz: List<QuizQuestion>, addCards: (List<Pair<String, String>>) -> Int) {
     var index by remember { mutableIntStateOf(0) }
+    var wrongInfo by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<Int, Int>() }
     val revealed = remember { mutableStateMapOf<Int, Boolean>() }
 
@@ -271,6 +314,18 @@ private fun StudyQuizTab(quiz: List<QuizQuestion>) {
             }
         }
 
+        val wrongIdx = revealed.keys.filter { selected[it] != quiz[it].correct }
+        if (wrongIdx.isNotEmpty()) {
+            OutlinedButton(onClick = {
+                val n = addCards(wrongIdx.map { i ->
+                    val qq = quiz[i]
+                    plainMd(qq.question) to (plainMd(qq.options[qq.correct]) + if (qq.explanation.isEmpty()) "" else "\n\n" + plainMd(qq.explanation))
+                })
+                wrongInfo = if (n > 0) "$n yanlış soru tekrar kartlarına eklendi" else "Bu sorular zaten defterde"
+            }) { Text("Yanlışlarımı tekrar kartlarına ekle (${wrongIdx.size})") }
+            wrongInfo?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+
         Spacer(Modifier.weight(1f))
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -295,9 +350,10 @@ private fun StudyQuizTab(quiz: List<QuizQuestion>) {
 }
 
 @Composable
-private fun StudyQATab(cards: List<QAItem>) {
+private fun StudyQATab(cards: List<QAItem>, addCards: (List<Pair<String, String>>) -> Int) {
     var index by remember { mutableIntStateOf(0) }
     var flipped by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf<String?>(null) }
 
     if (cards.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -367,6 +423,18 @@ private fun StudyQATab(cards: List<QAItem>) {
                 Text("Sonraki")
             }
         }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.TextButton(onClick = {
+                val n = addCards(listOf(plainMd(card.question) to plainMd(card.answer)))
+                info = if (n > 0) "Kart tekrar defterine eklendi" else "Bu kart zaten defterde"
+            }) { Text("+ Tekrar defterine ekle") }
+            androidx.compose.material3.TextButton(onClick = {
+                val n = addCards(cards.map { plainMd(it.question) to plainMd(it.answer) })
+                info = if (n > 0) "$n kart tekrar defterine eklendi" else "Bu kartlar zaten defterde"
+            }) { Text("Hepsini ekle") }
+        }
+        info?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 

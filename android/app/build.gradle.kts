@@ -19,6 +19,9 @@ android {
 
     buildTypes {
         release {
+            // Kişisel kullanım: release sürümü debug anahtarıyla imzalanır, böylece `installRelease` ile telefona kurulup
+            // gerçek (debug'a göre çok daha akıcı) performansı denenebilir.
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

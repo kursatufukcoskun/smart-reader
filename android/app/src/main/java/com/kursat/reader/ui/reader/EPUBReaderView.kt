@@ -26,6 +26,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
@@ -45,6 +48,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -57,6 +61,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -194,12 +199,39 @@ fun EPUBReaderView(
     val editing by model.editing.collectAsState()
     val studyModel by model.study.collectAsState()
     val hardWordsModel by model.hardWords.collectAsState()
+    val penMode by model.penMode.collectAsState()
+    val penResult by model.penResult.collectAsState()
+    val footnote by model.footnote.collectAsState()
+    val returnPoint by model.returnPoint.collectAsState()
+    val remoteOffer by model.remoteOffer.collectAsState()
+    val bookmarkItems by model.bookmarks.items.collectAsState()
+    val isBookmarkedHere = remember(bookmarkItems, chapterIndex, book.scrollFraction) {
+        bookmarkItems.any {
+            it.bookID.equals(book.id, ignoreCase = true) && it.isNote != true && it.chapter == chapterIndex &&
+                kotlin.math.abs((it.fraction ?: 0.0) - book.scrollFraction) < 0.012
+        }
+    }
+    val resumeDays by model.resumeDays.collectAsState()
+    val glossesHidden by model.glossesHidden.collectAsState()
+    val isGlossing by model.isGlossing.collectAsState()
+    val openChat by model.openChat.collectAsState()
 
     var chrome by remember { mutableStateOf(false) }
     com.kursat.reader.ui.shared.ImmersiveBars(hidden = !chrome)
     var showTOC by remember { mutableStateOf(false) }
+    var showSearch by remember { mutableStateOf(false) }
+    var showOverflow by remember { mutableStateOf(false) }
+    var showWrapUp by remember { mutableStateOf(false) }
+    DisposableEffect(model) {
+        val inner = model.search.open
+        model.search.open = { hit -> showSearch = false; inner(hit) }
+        onDispose { model.search.open = inner }
+    }
     var showTheme by remember { mutableStateOf(false) }
     var showChat by remember { mutableStateOf(false) }
+    LaunchedEffect(openChat) {
+        if (openChat) { showChat = true; model.chatOpened() }
+    }
     var tocTab by remember { mutableIntStateOf(0) }
     var barMode by remember { mutableIntStateOf(0) }
     var showTranslateMenu by remember { mutableStateOf(false) }
@@ -219,6 +251,7 @@ fun EPUBReaderView(
         }
     }
 
+    com.kursat.reader.ui.shared.KeepScreenAwake(settings, model.speech)
     ReaderChromeBox(settings = settings) {
         Box(
             modifier = Modifier
@@ -273,58 +306,12 @@ fun EPUBReaderView(
                         }
                         IconButton(onClick = { model.toggleBookmark() }) {
                             Icon(
-                                Icons.Default.BookmarkBorder,
+                                if (isBookmarkedHere) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
                                 contentDescription = "Yer imi",
                                 tint = settingsState.theme.textColor
                             )
                         }
-                        Box {
-                            IconButton(onClick = { showTranslateMenu = true }) {
-                                if (isTranslatingPage) {
-                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(
-                                        Icons.Default.Translate,
-                                        contentDescription = "Çeviri",
-                                        tint = settingsState.theme.textColor
-                                    )
-                                }
-                            }
-                            DropdownMenu(
-                                expanded = showTranslateMenu,
-                                onDismissRequest = { showTranslateMenu = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Ekrandakini çevir") },
-                                    onClick = {
-                                        showTranslateMenu = false
-                                        model.translateVisible()
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(if (translationsHidden) "Çevirileri göster" else "Çevirileri gizle") },
-                                    onClick = {
-                                        showTranslateMenu = false
-                                        model.toggleTranslations()
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Çevirileri sil", color = MaterialTheme.colorScheme.error) },
-                                    onClick = {
-                                        showTranslateMenu = false
-                                        model.clearTranslations()
-                                    }
-                                )
-                            }
-                        }
                         val speechOn by model.speech.state.collectAsState()
-                        IconButton(onClick = { model.toggleSpeech() }) {
-                            Icon(
-                                Icons.Default.VolumeUp,
-                                contentDescription = "Sesli oku",
-                                tint = if (speechOn != com.kursat.reader.speech.SpeechController.State.idle) MaterialTheme.colorScheme.primary else settingsState.theme.textColor
-                            )
-                        }
                         IconButton(onClick = { showChat = true }) {
                             Icon(
                                 Icons.Default.ChatBubbleOutline,
@@ -344,6 +331,18 @@ fun EPUBReaderView(
                                 expanded = showAiMenu,
                                 onDismissRequest = { showAiMenu = false }
                             ) {
+                                DropdownMenuItem(
+                                    text = { Text("Şimdiye kadar ne oldu?") },
+                                    onClick = { showAiMenu = false; model.askBook(com.kursat.reader.ai.Prompts.recap) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Karakter ve kavram rehberi") },
+                                    onClick = { showAiMenu = false; model.askBook(com.kursat.reader.ai.Prompts.cast) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Karakter ve ilişki haritası") },
+                                    onClick = { showAiMenu = false; model.showRelationMap() }
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Bölümü özetle") },
                                     onClick = {
@@ -367,12 +366,46 @@ fun EPUBReaderView(
                                 )
                             }
                         }
-                        IconButton(onClick = { showTheme = true }) {
-                            Icon(
-                                Icons.Default.FormatSize,
-                                contentDescription = "Görünüm",
-                                tint = settingsState.theme.textColor
-                            )
+                        val speechStateTop by model.speech.state.collectAsState()
+                        Box {
+                            IconButton(onClick = { showOverflow = true }) {
+                                if (isTranslatingPage || isGlossing) {
+                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "Diğer", tint = settingsState.theme.textColor)
+                                }
+                            }
+                            DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
+                                DropdownMenuItem(text = { Text("Kitapta ara") }, onClick = { showOverflow = false; showSearch = true })
+                                DropdownMenuItem(
+                                    text = { Text("Kalem modu" + if (penMode) "  ✓" else "") },
+                                    onClick = { showOverflow = false; model.togglePenMode() }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Sesli oku" + if (speechStateTop != com.kursat.reader.speech.SpeechController.State.idle) "  ✓" else "") },
+                                    onClick = { showOverflow = false; model.toggleSpeech() }
+                                )
+                                DropdownMenuItem(text = { Text("Görünüm ve yazı") }, onClick = { showOverflow = false; showTheme = true })
+                                HorizontalDivider()
+                                DropdownMenuItem(text = { Text("Ekrandakini çevir") }, onClick = { showOverflow = false; model.translateVisible() })
+                                DropdownMenuItem(
+                                    text = { Text(if (translationsHidden) "Çevirileri göster" else "Çevirileri gizle") },
+                                    onClick = { showOverflow = false; model.toggleTranslations() }
+                                )
+                                DropdownMenuItem(text = { Text("Zor kelimelere ipucu ekle") }, onClick = { showOverflow = false; model.glossVisible() })
+                                DropdownMenuItem(
+                                    text = { Text(if (glossesHidden) "İpuçlarını göster" else "İpuçlarını gizle") },
+                                    onClick = { showOverflow = false; model.toggleGlosses() }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("İpuçlarını sil", color = MaterialTheme.colorScheme.error) },
+                                    onClick = { showOverflow = false; model.clearGlosses() }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Çevirileri sil", color = MaterialTheme.colorScheme.error) },
+                                    onClick = { showOverflow = false; model.clearTranslations() }
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -475,12 +508,89 @@ fun EPUBReaderView(
                     .padding(bottom = if (chrome) 68.dp else 24.dp)
             ) {
                 SelectionBar(
+                    onXray = { model.perform(SelectionAction.xray) },
+                    onDictionary = { model.perform(SelectionAction.dictionary) },
                     onExplain = { model.perform(SelectionAction.explain) },
                     onTranslate = { model.perform(SelectionAction.translateParagraph) },
                     onHighlight = { model.perform(SelectionAction.highlight) },
                     onNote = { model.perform(SelectionAction.note) },
                     onGrammar = { model.perform(SelectionAction.grammar) }
                 )
+            }
+
+
+            // Kalem paleti (kalem modunda üstte)
+            AnimatedVisibility(
+                visible = penMode,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (chrome) 64.dp else 12.dp)
+            ) {
+                com.kursat.reader.ui.shared.PenPalette(
+                    style = settingsState.penStyle,
+                    color = settingsState.highlightColor,
+                    onStyle = { st -> settings.update { it.copy(penStyle = st) } },
+                    onColor = { c -> settings.update { it.copy(highlightColor = c) } },
+                    onClose = { model.setPenMode(false) }
+                )
+            }
+
+            // Kalemle çizince çıkan kısa menü
+            AnimatedVisibility(
+                visible = penResult != null && !hasSelection,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = if (chrome) 68.dp else 24.dp)
+            ) {
+                com.kursat.reader.ui.shared.PenResultBar(
+                    showDictionary = penResult?.let { com.kursat.reader.ui.shared.QuickDictionary.term(it.highlight.text) } != null,
+                    onDictionary = { model.penAction(SelectionAction.dictionary) },
+                    onTranslate = { model.penAction(SelectionAction.translateParagraph) },
+                    onExplain = { model.penAction(SelectionAction.explain) },
+                    onNote = { model.penAction(SelectionAction.note) },
+                    onUndo = { model.undoPen() }
+                )
+            }
+
+            // "Buraya atladın · Kalıcı olsun mu?" çubuğu (sürüklenebilir)
+            if (returnPoint != null) {
+                com.kursat.reader.ui.shared.DraggableJumpBar(
+                    from = model.returnLabel,
+                    onKeep = { model.keepJump() },
+                    onBack = { model.returnFromJump() },
+                    bottomPadding = if (chrome) 130.dp else 84.dp
+                )
+            }
+
+
+            // Başka cihazda daha yeni konum varsa sor
+            if (remoteOffer != null) {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = (if (chrome) 64.dp else 12.dp) + (if (penMode) 56.dp else 0.dp))
+                ) {
+                    com.kursat.reader.ui.shared.RemoteProgressBar(
+                        label = model.remoteLabel,
+                        onAccept = { model.acceptRemote() },
+                        onKeep = { model.keepLocalPosition() }
+                    )
+                }
+            }
+
+            // Uzun aradan sonra "son kaldığın yeri hatırlat" önerisi
+            resumeDays?.let { d ->
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = (if (chrome) 64.dp else 12.dp) + (if (penMode) 56.dp else 0.dp) + (if (remoteOffer != null) 66.dp else 0.dp))
+                ) {
+                    com.kursat.reader.ui.shared.ResumeBar(days = d, onAsk = { model.askResume() }, onDismiss = { model.dismissResume() })
+                }
             }
 
             // Bölüm sonu "Bölümü pekiştir" önerisi
@@ -497,7 +607,7 @@ fun EPUBReaderView(
                     tonalElevation = 6.dp,
                     shadowElevation = 6.dp,
                     modifier = Modifier.clickable {
-                        model.prepareStudy()
+                        if (model.isBookEnd) showWrapUp = true else model.prepareStudy()
                     }
                 ) {
                     Row(
@@ -506,7 +616,7 @@ fun EPUBReaderView(
                     ) {
                         Icon(Icons.Default.School, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Bölümü pekiştir", fontWeight = FontWeight.SemiBold)
+                        Text(if (model.isBookEnd) "Kitabı bitirdin: karneni gör" else "Bölümü pekiştir", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
@@ -540,6 +650,25 @@ fun EPUBReaderView(
             model = hwm,
             vocab = vocab,
             onDismiss = { model.dismissHardWords() }
+        )
+    }
+
+    com.kursat.reader.ui.shared.RelationMapDialog(model.relationMap, onRegenerate = { model.showRelationMap() })
+    if (showWrapUp) {
+        com.kursat.reader.ui.shared.BookWrapUpSheet(book = book, onDismiss = { showWrapUp = false })
+    }
+    if (showSearch) {
+        com.kursat.reader.ui.shared.BookSearchSheet(
+            model = model.search,
+            onDismiss = { showSearch = false }
+        )
+    }
+    footnote?.let { info ->
+        com.kursat.reader.ui.shared.FootnoteSheet(
+            info = info,
+            onTranslate = { model.translateFootnote(info) },
+            onShow = { model.showFootnoteInText(info) },
+            onDismiss = { model.dismissFootnote() }
         )
     }
 
@@ -587,6 +716,10 @@ fun EPUBReaderView(
                     }
                     1 -> {
                         val bookHighlights = model.highlights.forBook(book.id)
+                        val generating by model.isGeneratingInsights.collectAsState()
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            com.kursat.reader.ui.shared.InsightsHeader(generating) { model.generateInsights() }
+                            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         if (bookHighlights.isEmpty()) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("Henüz vurgu yok", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -604,14 +737,21 @@ fun EPUBReaderView(
                                             .padding(16.dp),
                                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(4.dp)
-                                                .height(44.dp)
-                                                .background(h.color.color, RoundedCornerShape(2.dp))
-                                        )
+                                        if (h.isInsight) {
+                                            Text("✨", modifier = Modifier.width(20.dp))
+                                        } else {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(4.dp)
+                                                    .height(44.dp)
+                                                    .background(h.color.color, RoundedCornerShape(2.dp))
+                                            )
+                                        }
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text(h.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                            if (h.isInsight) {
+                                                Text("Yapay zekâ içgörüsü", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                                            }
+                                            Text(h.text, maxLines = if (h.isInsight) 8 else 3, overflow = TextOverflow.Ellipsis)
                                             if (h.note.isNotEmpty()) {
                                                 Text(
                                                     h.note,
@@ -631,6 +771,8 @@ fun EPUBReaderView(
                                     }
                                 }
                             }
+                        }
+                                                }
                         }
                     }
                     else -> {
@@ -657,7 +799,7 @@ fun EPUBReaderView(
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = b.snippet.ifEmpty { b.location },
-                                                maxLines = 2,
+                                                maxLines = if (b.isNote == true) 6 else 2,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
@@ -716,6 +858,39 @@ fun HighlightEditorSheet(
 ) {
     var color by remember(initial.id) { mutableStateOf(initial.color) }
     var note by remember(initial.id) { mutableStateOf(initial.note) }
+    val appCtx = LocalContext.current.applicationContext
+    val cardScope = androidx.compose.runtime.rememberCoroutineScope()
+    var makingCard by remember(initial.id) { mutableStateOf(false) }
+    var cardInfo by remember(initial.id) { mutableStateOf<String?>(null) }
+
+    /** Vurgudan (ve notundan) yapay zekâ ile tek soru/cevap kartı üretip kelime defterine ekler. */
+    fun makeCard() {
+        val app = appCtx as? com.kursat.reader.ReaderApplication ?: return
+        makingCard = true
+        cardInfo = null
+        cardScope.launch {
+            try {
+                val cfg = app.settings.current.config(com.kursat.reader.model.LLMTier.fast)
+                val out = com.kursat.reader.ai.LLMClient.complete(
+                    cfg,
+                    system = com.kursat.reader.ai.Prompts.assistantSystem,
+                    user = com.kursat.reader.ai.Prompts.flashcard(initial.text, note, initial.bookTitle),
+                    maxTokens = 512
+                )
+                val card = com.kursat.reader.ai.Prompts.parseFlashcard(out)
+                if (card == null) {
+                    cardInfo = "Kart üretilemedi, tekrar dene."
+                } else {
+                    app.vocab.addCard(card.first, card.second, initial.text, initial.bookID, initial.bookTitle)
+                    cardInfo = "Karta eklendi: ${card.first}"
+                }
+            } catch (e: Exception) {
+                cardInfo = e.message ?: "Kart üretilemedi."
+            } finally {
+                makingCard = false
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = {
@@ -740,6 +915,7 @@ fun HighlightEditorSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            if (!initial.isInsight) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 HighlightColor.entries.forEach { c ->
                     Box(
@@ -756,6 +932,7 @@ fun HighlightEditorSheet(
                     )
                 }
             }
+            }
             OutlinedTextField(
                 value = note,
                 onValueChange = { note = it },
@@ -764,6 +941,20 @@ fun HighlightEditorSheet(
                     .fillMaxWidth()
                     .height(140.dp)
             )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                androidx.compose.material3.OutlinedButton(onClick = {
+                    val app = appCtx as? com.kursat.reader.ReaderApplication
+                    val author = app?.library?.book(initial.bookID)?.author.orEmpty()
+                    val theme = app?.settings?.current?.theme ?: com.kursat.reader.model.ReaderTheme.light
+                    com.kursat.reader.ui.shared.QuoteCard.share(appCtx, initial.text, initial.bookTitle, author, theme)
+                }) { Text("Alıntı kartı olarak paylaş") }
+                androidx.compose.material3.OutlinedButton(onClick = { makeCard() }, enabled = !makingCard) {
+                    Text(if (makingCard) "Kart hazırlanıyor…" else "Bu vurgudan kart yap")
+                }
+                cardInfo?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween

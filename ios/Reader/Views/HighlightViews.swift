@@ -9,8 +9,33 @@ struct HighlightEditor: View {
     var onDelete: (Highlight) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var vocab: VocabStore
+    @EnvironmentObject private var settings: ReaderSettings
     @FocusState private var noteFocused: Bool
     @State private var deleted = false
+    @State private var makingCard = false
+    @State private var cardInfo: String?
+
+    /// Vurgudan (ve notundan) yapay zekâ ile tek soru/cevap kartı üretip kelime defterine ekler.
+    private func makeCard() {
+        makingCard = true
+        cardInfo = nil
+        let h = draft
+        let config = settings.config(.fast)
+        Task {
+            defer { makingCard = false }
+            do {
+                let out = try await LLMClient.complete(config, system: Prompts.assistantSystem,
+                                                       user: Prompts.flashcard(quote: h.text, note: h.note, bookTitle: h.bookTitle),
+                                                       maxTokens: 512)
+                guard let card = Prompts.parseFlashcard(out) else { cardInfo = "Kart üretilemedi, tekrar dene."; return }
+                vocab.addCard(question: card.question, answer: card.answer, quote: h.text, bookID: h.bookID, bookTitle: h.bookTitle)
+                cardInfo = "Karta eklendi: \(card.question)"
+            } catch {
+                cardInfo = error.localizedDescription
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -24,7 +49,7 @@ struct HighlightEditor: View {
                         Text(draft.location).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Section("Renk") {
+                if !draft.isInsight { Section("Renk") {
                     HStack(spacing: 16) {
                         ForEach(HighlightColor.allCases) { c in
                             Button { draft.color = c } label: {
@@ -36,11 +61,22 @@ struct HighlightEditor: View {
                         }
                     }
                     .padding(.vertical, 4)
-                }
+                } }
                 Section("Not") {
                     TextEditor(text: $draft.note)
                         .frame(minHeight: 140)
                         .focused($noteFocused)
+                }
+                Section("Paylaş") {
+                    QuoteShareButton(highlight: draft)
+                }
+                Section("Tekrar kartı") {
+                    Button { makeCard() } label: {
+                        if makingCard { HStack { ProgressView(); Text("Kart hazırlanıyor…") } }
+                        else { Label("Bu vurgudan kart yap", systemImage: "rectangle.on.rectangle.angled") }
+                    }
+                    .disabled(makingCard)
+                    if let cardInfo { Text(cardInfo).font(.footnote).foregroundStyle(.secondary) }
                 }
                 Section {
                     Button(role: .destructive) {
@@ -67,9 +103,16 @@ struct HighlightRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 2).fill(h.color.color).frame(width: 4)
+            if h.isInsight {
+                Image(systemName: "sparkles").foregroundStyle(.purple).frame(width: 4).padding(.top, 2).padding(.trailing, 10)
+            } else {
+                RoundedRectangle(cornerRadius: 2).fill(h.color.color).frame(width: 4)
+            }
             VStack(alignment: .leading, spacing: 5) {
-                Text(h.text).font(.system(size: 16, design: .serif)).lineLimit(4).multilineTextAlignment(.leading)
+                if h.isInsight {
+                    Text("Yapay zekâ içgörüsü").font(.caption2.weight(.semibold)).foregroundStyle(.purple)
+                }
+                Text(h.text).font(.system(size: 16, design: h.isInsight ? .default : .serif)).lineLimit(h.isInsight ? 8 : 4).multilineTextAlignment(.leading)
                 if !h.note.isEmpty {
                     Label(h.note, systemImage: "note.text")
                         .font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
@@ -91,15 +134,35 @@ struct BookHighlightsList: View {
     let bookID: UUID
     var onSelect: (Highlight) -> Void
     var onDelete: (Highlight) -> Void
+    /// Verilirse listenin başında "Bu bölümün içgörülerini çıkar" düğmesi görünür.
+    var onInsights: (() -> Void)?
+    var isGeneratingInsights = false
     @EnvironmentObject var store: HighlightStore
 
     var body: some View {
         let items = store.forBook(bookID)
-        if items.isEmpty {
+        if items.isEmpty && onInsights == nil {
             ContentUnavailableView("Henüz vurgu yok", systemImage: "highlighter",
                                    description: Text("Bir metni seçip fosforlu kalem düğmesine dokunun."))
         } else {
             List {
+                if let onInsights {
+                    Section {
+                        Button(action: onInsights) {
+                            if isGeneratingInsights {
+                                HStack { ProgressView(); Text("İçgörüler hazırlanıyor…") }
+                            } else {
+                                Label("Bu bölümün içgörülerini çıkar", systemImage: "sparkles")
+                            }
+                        }
+                        .disabled(isGeneratingInsights)
+                    } footer: {
+                        Text("Yapay zekâ bulunduğun bölümden 3-5 içgörü çıkarır; vurgularından ayrı, ✨ ile işaretli görünür.")
+                    }
+                }
+                if items.isEmpty {
+                    Text("Henüz vurgu yok. Bir metni seçip fosforlu kalem düğmesine dokun.").font(.footnote).foregroundStyle(.secondary)
+                }
                 ForEach(items) { h in
                     Button { onSelect(h) } label: { HighlightRow(h: h) }.buttonStyle(.plain)
                 }
@@ -113,16 +176,45 @@ struct BookHighlightsList: View {
 
 struct HighlightsView: View {
     @EnvironmentObject var store: HighlightStore
+    @EnvironmentObject var library: LibraryStore
+    @EnvironmentObject var settings: ReaderSettings
+    @StateObject private var ai = AIAssistant()
+    @State private var tag: String?
     @State private var search = ""
     @State private var editing: Highlight?
     @State private var openBook: UUID?
 
     private var filtered: [Highlight] {
-        store.items.filter {
-            search.isEmpty || $0.text.localizedCaseInsensitiveContains(search)
-            || $0.note.localizedCaseInsensitiveContains(search)
-            || $0.bookTitle.localizedCaseInsensitiveContains(search)
+        let tagged: Set<UUID>? = tag.map { t in Set(library.books.filter { ($0.tags ?? []).contains(t) }.map(\.id)) }
+        return store.items.filter {
+            (tagged == nil || tagged!.contains($0.bookID)) &&
+            (search.isEmpty || $0.text.localizedCaseInsensitiveContains(search)
+             || $0.note.localizedCaseInsensitiveContains(search)
+             || $0.bookTitle.localizedCaseInsensitiveContains(search))
         }
+    }
+
+    /// Süzülen vurgu ve notlardan ortak temalar, bağlantılar ve bir sentez çıkarır.
+    private func synthesize() {
+        var text = ""
+        for g in groups {
+            text += "\n## \(g.title)\n"
+            for h in g.items where !h.isInsight {
+                text += "- \"\(h.text.replacingOccurrences(of: "\n", with: " "))\""
+                if !h.note.isEmpty { text += " — not: \(h.note)" }
+                text += "\n"
+            }
+        }
+        text = String(text.prefix(60_000))
+        let scope = tag.map { "#\($0)" } ?? (search.isEmpty ? "tüm kitaplar" : "“\(search)”")
+        let config = settings.config(.smart)
+        ai.start(AIRequest(
+            title: "Vurgu sentezi: \(scope)",
+            system: Prompts.summarySystem,
+            user: Prompts.highlightSynthesis(text: text, scope: scope),
+            config: config,
+            maxTokens: 3072,
+            cacheKey: ResponseCache.key("hlsyn", config.cacheID, text)))
     }
 
     private var groups: [(title: String, items: [Highlight])] {
@@ -162,6 +254,21 @@ struct HighlightsView: View {
             }
         }
         .toolbar {
+            if !library.allTags.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button { tag = nil } label: { Label("Tüm kitaplar", systemImage: tag == nil ? "checkmark" : "books.vertical") }
+                        ForEach(library.allTags, id: \.self) { t in
+                            Button { tag = t } label: { Label("#\(t)", systemImage: tag == t ? "checkmark" : "tag") }
+                        }
+                    } label: { Image(systemName: tag == nil ? "tag" : "tag.fill") }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { synthesize() } label: { Image(systemName: "sparkles") }
+                    .disabled(filtered.isEmpty)
+                    .accessibilityLabel("Yapay zekâ ile sentezle")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: store.exportMarkdown(), subject: Text("Vurgular ve notlar")) {
                     Image(systemName: "square.and.arrow.up")
@@ -169,6 +276,7 @@ struct HighlightsView: View {
                 .disabled(store.items.isEmpty)
             }
         }
+        .aiSheet(ai)
         .navigationDestination(item: $openBook) { id in ReaderContainer(bookID: id) }
         .sheet(item: $editing) { h in
             HighlightEditor(draft: h, focusNote: false,

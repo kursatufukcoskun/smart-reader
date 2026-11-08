@@ -35,6 +35,9 @@ data class StudyData(
     val qa: List<QAItem> = emptyList()
 )
 
+/** Çalışma setindeki maddeleri "içgörü" olarak vurgulara eklerken kullanılan konum bilgisi. */
+data class InsightTarget(val chapter: Int?, val page: Int?, val location: String)
+
 class ChapterStudyModel(
     val title: String,
     text: String,
@@ -43,8 +46,10 @@ class ChapterStudyModel(
     private val scopeKey: String
 ) {
     private val clippedText = text.take(80_000)
-    private val bookTitle = book.title
-    private val bookID = book.id
+    val bookTitle = book.title
+    val bookID = book.id
+    /** Okuyucu doldurur: içgörülerin ekleneceği bölüm/sayfa */
+    var insightTarget: InsightTarget? = null
 
     private val _data = MutableStateFlow<StudyData?>(null)
     val data: StateFlow<StudyData?> = _data.asStateFlow()
